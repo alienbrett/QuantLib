@@ -2103,6 +2103,7 @@ set(QL_HEADERS
     termstructures/volatility/equityfx/localvolcurve.hpp
     termstructures/volatility/equityfx/localvolsurface.hpp
     termstructures/volatility/equityfx/localvoltermstructure.hpp
+    termstructures/volatility/equityfx/mynewvolsurface.hpp
     termstructures/volatility/equityfx/noexceptlocalvolsurface.hpp
     termstructures/volatility/flatsmilesection.hpp
     termstructures/volatility/gaussian1dsmilesection.hpp

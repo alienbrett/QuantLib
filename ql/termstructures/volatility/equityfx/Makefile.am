@@ -19,6 +19,7 @@ this_include_HEADERS = \
     localvolcurve.hpp \
     localvolsurface.hpp \
     localvoltermstructure.hpp \
+    mynewvolsurface.hpp \
     noexceptlocalvolsurface.hpp
 
 cpp_files = \
