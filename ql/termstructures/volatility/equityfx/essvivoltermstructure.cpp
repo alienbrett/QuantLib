@@ -262,4 +262,81 @@ namespace QuantLib {
         return surface_.impliedVol(k, t);
     }
 
+    // =================================================================
+    // Batch evaluation
+    // =================================================================
+
+    std::vector<Real>
+    EssviVolatilityTermStructure::batchBlackVol(
+            const std::vector<Size>& sliceIndices,
+            const std::vector<Real>& strikes) const {
+        const Size nObs = sliceIndices.size();
+        QL_REQUIRE(strikes.size() == nObs, "strikes size mismatch");
+
+        // Precompute forwards per slice
+        const auto& T = surface_.maturities();
+        const Size nSlices = T.size();
+        std::vector<Real> fwds(nSlices);
+        for (Size s = 0; s < nSlices; ++s)
+            fwds[s] = forward(T[s]);
+
+        std::vector<Real> vols(nObs);
+        for (Size i = 0; i < nObs; ++i) {
+            Size si = sliceIndices[i];
+            Real k = std::log(strikes[i] / fwds[si]);
+            Real w = surface_.totalVariance(si, k);
+            vols[i] = std::sqrt(w / T[si]);
+        }
+        return vols;
+    }
+
+    std::vector<Real>
+    EssviVolatilityTermStructure::batchImpliedVolGlobalGradient(
+            const std::vector<Size>& sliceIndices,
+            const std::vector<Real>& strikes,
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond) const {
+        const Size nObs = sliceIndices.size();
+        QL_REQUIRE(strikes.size() == nObs, "strikes size mismatch");
+        const Size N = gp.numSlices();
+        const Size nParams = 3 * N;
+
+        // Precompute forwards
+        const auto& T = surface_.maturities();
+        std::vector<Real> fwds(N);
+        for (Size s = 0; s < N; ++s)
+            fwds[s] = forward(T[s]);
+
+        // ── Factored Jacobian: compute chain Jacobian ONCE ──
+        // chainJac layout: [dTheta(N×P), dPsi(N×P)] where P = nParams
+        auto chainJac = surface_.chainJacobian(gp, bflyCond);
+        const Real* dTheta = chainJac.data();
+        const Real* dPsi   = chainJac.data() + N * nParams;
+
+        // For each observation, combine per-slice gradient with chain Jacobian.
+        // grad[j] = dSigma/dTheta * dTheta[si,j] + dSigma/dRho * delta(j==rhoOff+si)
+        //         + dSigma/dPsi * dPsi[si,j]
+        Size rhoOff = 0;
+
+        std::vector<Real> J(nObs * nParams, 0.0);
+        for (Size i = 0; i < nObs; ++i) {
+            Size si = sliceIndices[i];
+            Real k = std::log(strikes[i] / fwds[si]);
+            EssviSliceGradient sg = essviImpliedVolGradient(
+                surface_.slice(si), k, T[si]);
+
+            Real* row = &J[i * nParams];
+            const Real* dTh_row = &dTheta[si * nParams];
+            const Real* dPs_row = &dPsi[si * nParams];
+
+            for (Size j = 0; j < nParams; ++j) {
+                row[j] = sg.dSigma_dTheta * dTh_row[j]
+                       + sg.dSigma_dPsi   * dPs_row[j];
+            }
+            // Direct rho contribution (rho_si is a direct global param)
+            row[rhoOff + si] += sg.dSigma_dRho;
+        }
+        return J;
+    }
+
 } // namespace QuantLib

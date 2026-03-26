@@ -17,84 +17,51 @@
  FOR A PARTICULAR PURPOSE.  See the license for more details.
 */
 
-/*! \file essvivoltermstructure.hpp
-    \brief eSSVI volatility term structure
+/*! \file dualwingessvi.hpp
+    \brief Dual-wing eSSVI volatility term structure
 
-    Global arbitrage-free eSSVI volatility surface as a QuantLib
-    BlackVolatilityTermStructure. Based on:
-      Mingone (2022), "No arbitrage global parametrization for the eSSVI
-      volatility surface", arXiv:2204.00312v1.
-
-    Supports discrete dividends: when a DividendSchedule is provided,
-    the forward is computed as:
-      F(T) = (S - PV(fixed divs before T)) * exp(-q*T) / exp(-r*T)
-    where PV discounts each dividend at the risk-free rate.
+    Extension of eSSVI with separate curvature parameters (psi) for
+    put and call wings.  C^0 at ATMF (w(0)=theta), kink when psi_lo != psi_hi.
+    Each wing is independently arb-free via the Mingone global parametrization.
 */
 
-#ifndef quantlib_essvi_vol_term_structure_hpp
-#define quantlib_essvi_vol_term_structure_hpp
+#ifndef quantlib_dual_wing_essvi_vol_term_structure_hpp
+#define quantlib_dual_wing_essvi_vol_term_structure_hpp
 
 #include <ql/termstructures/volatility/equityfx/blackvoltermstructure.hpp>
 #include <ql/termstructures/volatility/equityfx/essvihelpers.hpp>
 #include <ql/termstructures/yieldtermstructure.hpp>
-#include <ql/instruments/dividendschedule.hpp>
 #include <ql/quote.hpp>
 #include <ql/handle.hpp>
 #include <ql/time/daycounters/actual365fixed.hpp>
 
 namespace QuantLib {
 
-    //! eSSVI volatility term structure
-    /*! Implements the extended Surface SVI (eSSVI) volatility surface
-        with the global arbitrage-free parametrization from Mingone (2022).
-
-        The surface can be constructed from either:
-        - Native per-slice parameters (theta, rho, psi)
-        - Global arb-free parameters (rhos, theta1, as, cs)
-
-        The surface requires a spot price and yield curves to convert
-        between strikes and log-forward moneyness internally.
-
-        When a DividendSchedule is provided, discrete cash dividends
-        are subtracted from the spot (PV'd at the risk-free rate)
-        before computing the forward. This ensures log-moneyness is
-        computed against the correct forward price.
-    */
-    class EssviVolatilityTermStructure : public BlackVolatilityTermStructure {
+    //! Dual-wing eSSVI volatility term structure
+    class DualWingEssviVolatilityTermStructure : public BlackVolatilityTermStructure {
       public:
-        //! Construct from native per-slice SSVI parameters
-        EssviVolatilityTermStructure(
+        //! Construct from native per-slice dual-wing parameters
+        DualWingEssviVolatilityTermStructure(
             const Date& referenceDate,
             const std::vector<Date>& dates,
             const std::vector<Real>& thetas,
             const std::vector<Real>& rhos,
-            const std::vector<Real>& psis,
+            const std::vector<Real>& psis_lo,
+            const std::vector<Real>& psis_hi,
             Handle<Quote> spot,
             Handle<YieldTermStructure> riskFreeRate,
             Handle<YieldTermStructure> dividendYield,
             const DayCounter& dc = Actual365Fixed());
 
-        //! Construct from native params with discrete dividends
-        EssviVolatilityTermStructure(
-            const Date& referenceDate,
-            const std::vector<Date>& dates,
-            const std::vector<Real>& thetas,
-            const std::vector<Real>& rhos,
-            const std::vector<Real>& psis,
-            Handle<Quote> spot,
-            Handle<YieldTermStructure> riskFreeRate,
-            Handle<YieldTermStructure> dividendYield,
-            DividendSchedule dividends,
-            const DayCounter& dc = Actual365Fixed());
-
-        //! Construct from global arb-free parameters (Proposition 3.1)
-        EssviVolatilityTermStructure(
+        //! Construct from global arb-free dual-wing parameters
+        DualWingEssviVolatilityTermStructure(
             const Date& referenceDate,
             const std::vector<Date>& dates,
             const std::vector<Real>& rhos,
             Real theta1,
             const std::vector<Real>& as,
-            const std::vector<Real>& cs,
+            const std::vector<Real>& cs_lo,
+            const std::vector<Real>& cs_hi,
             Handle<Quote> spot,
             Handle<YieldTermStructure> riskFreeRate,
             Handle<YieldTermStructure> dividendYield,
@@ -116,47 +83,36 @@ namespace QuantLib {
         //! \name Inspectors
         //@{
         Size numSlices() const;
-        const std::vector<EssviSliceParams>& slices() const;
-        const EssviSurface& surface() const { return surface_; }
+        const std::vector<DualWingEssviSliceParams>& slices() const;
+        const DualWingEssviSurface& surface() const { return surface_; }
         //@}
 
         //! \name Gradient
         //@{
-        //! Gradient of blackVol w.r.t. native (theta_i, rho_i, psi_i) for slice i
-        EssviSliceGradient impliedVolGradient(Size sliceIdx, Real strike) const;
+        DualWingEssviSliceGradient impliedVolGradient(Size sliceIdx, Real strike) const;
 
-        //! Gradient of blackVol w.r.t. global params [rhos, theta1, as, cs]
         std::vector<Real> impliedVolGlobalGradient(
             Size sliceIdx, Real strike,
-            const EssviGlobalParams& gp,
+            const DualWingEssviGlobalParams& gp,
             EssviButterflyCondition::Type bflyCond
                 = EssviButterflyCondition::GatheralJacquier) const;
         //@}
 
-        //! \name Batch evaluation (vectorized, avoids per-call SWIG overhead)
+        //! \name Batch evaluation
         //@{
-        /*! Evaluate blackVol for multiple (sliceIdx, strike) pairs.
-            Returns vector of length N = sliceIndices.size().
-        */
         std::vector<Real> batchBlackVol(
             const std::vector<Size>& sliceIndices,
             const std::vector<Real>& strikes) const;
 
-        /*! Evaluate impliedVolGlobalGradient for multiple observations.
-            Returns flat row-major matrix: N_obs rows × N_params cols.
-        */
         std::vector<Real> batchImpliedVolGlobalGradient(
             const std::vector<Size>& sliceIndices,
             const std::vector<Real>& strikes,
-            const EssviGlobalParams& gp,
+            const DualWingEssviGlobalParams& gp,
             EssviButterflyCondition::Type bflyCond
                 = EssviButterflyCondition::GatheralJacquier) const;
         //@}
 
-        //! \name Visitability
-        //@{
         void accept(AcyclicVisitor&) override;
-        //@}
 
       protected:
         Volatility blackVolImpl(Time t, Real strike) const override;
@@ -164,11 +120,10 @@ namespace QuantLib {
       private:
         Real forward(Time t) const;
 
-        EssviSurface surface_;
+        DualWingEssviSurface surface_;
         Handle<Quote> spot_;
         Handle<YieldTermStructure> riskFreeRate_;
         Handle<YieldTermStructure> dividendYield_;
-        DividendSchedule dividends_;
     };
 
 } // namespace QuantLib
