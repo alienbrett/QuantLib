@@ -770,12 +770,14 @@ set(QL_SOURCES
     pricingengines/vanilla/jumpdiffusionengine.cpp
     pricingengines/vanilla/juquadraticengine.cpp
     pricingengines/vanilla/mcamericanengine.cpp
+    pricingengines/vanilla/mcamericanhwborrowengine.cpp
     pricingengines/vanilla/mcdigitalengine.cpp
     pricingengines/vanilla/mchestonhullwhiteengine.cpp
     pricingengines/vanilla/qdfpamericanengine.cpp
     pricingengines/vanilla/qdplusamericanengine.cpp
     processes/batesprocess.cpp
     processes/blackscholesprocess.cpp
+    processes/blackscholeshwborrowprocess.cpp
     processes/endeulerdiscretization.cpp
     processes/eulerdiscretization.cpp
     processes/forwardmeasureprocess.cpp
@@ -833,6 +835,9 @@ set(QL_SOURCES
     termstructures/volatility/equityfx/blackvariancecurve.cpp
     termstructures/volatility/equityfx/blackvariancesurface.cpp
     termstructures/volatility/equityfx/blackvoltermstructure.cpp
+    termstructures/volatility/equityfx/essvihelpers.cpp
+    termstructures/volatility/equityfx/essvivoltermstructure.cpp
+    termstructures/volatility/equityfx/essvilocalvolsurface.cpp
     termstructures/volatility/equityfx/fixedlocalvolsurface.cpp
     termstructures/volatility/equityfx/gridmodellocalvolsurface.cpp
     termstructures/volatility/equityfx/hestonblackvolsurface.cpp
@@ -2008,6 +2013,7 @@ set(QL_HEADERS
     pricingengines/vanilla/jumpdiffusionengine.hpp
     pricingengines/vanilla/juquadraticengine.hpp
     pricingengines/vanilla/mcamericanengine.hpp
+    pricingengines/vanilla/mcamericanhwborrowengine.hpp
     pricingengines/vanilla/mcdigitalengine.hpp
     pricingengines/vanilla/mceuropeanengine.hpp
     pricingengines/vanilla/mceuropeangjrgarchengine.hpp
@@ -2018,6 +2024,7 @@ set(QL_HEADERS
     pricingengines/vanilla/qdplusamericanengine.hpp
     processes/batesprocess.hpp
     processes/blackscholesprocess.hpp
+    processes/blackscholeshwborrowprocess.hpp
     processes/endeulerdiscretization.hpp
     processes/eulerdiscretization.hpp
     processes/forwardmeasureprocess.hpp
@@ -2095,6 +2102,9 @@ set(QL_HEADERS
     termstructures/volatility/equityfx/blackvariancecurve.hpp
     termstructures/volatility/equityfx/blackvariancesurface.hpp
     termstructures/volatility/equityfx/blackvoltermstructure.hpp
+    termstructures/volatility/equityfx/essvihelpers.hpp
+    termstructures/volatility/equityfx/essvivoltermstructure.hpp
+    termstructures/volatility/equityfx/essvilocalvolsurface.hpp
     termstructures/volatility/equityfx/fixedlocalvolsurface.hpp
     termstructures/volatility/equityfx/gridmodellocalvolsurface.hpp
     termstructures/volatility/equityfx/hestonblackvolsurface.hpp

@@ -78,6 +78,7 @@ set(QL_TEST_SOURCES
     hestonslvmodel.cpp
     himalayaoption.cpp
     hybridhestonhullwhiteprocess.cpp
+    mcamericanhwborrowengine.cpp
     indexes.cpp
     inflation.cpp
     inflationcapfloor.cpp

@@ -11,6 +11,8 @@ this_include_HEADERS = \
     blackvariancecurve.hpp \
     blackvariancesurface.hpp \
     blackvoltermstructure.hpp \
+    essvihelpers.hpp \
+    essvivoltermstructure.hpp \
     fixedlocalvolsurface.hpp \
     gridmodellocalvolsurface.hpp \
     hestonblackvolsurface.hpp \
@@ -29,6 +31,8 @@ cpp_files = \
     blackvariancecurve.cpp \
     blackvariancesurface.cpp \
     blackvoltermstructure.cpp \
+    essvihelpers.cpp \
+    essvivoltermstructure.cpp \
     fixedlocalvolsurface.cpp \
     gridmodellocalvolsurface.cpp \
     hestonblackvolsurface.cpp \

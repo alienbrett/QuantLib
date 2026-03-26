@@ -1,6 +1,5 @@
 #!/usr/bin/python -u
 
-import multiprocessing as mp
 import sys
 import os
 import re
