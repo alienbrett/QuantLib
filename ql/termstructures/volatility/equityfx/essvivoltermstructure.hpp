@@ -102,6 +102,22 @@ namespace QuantLib {
                 = EssviButterflyCondition::GatheralJacquier,
             const DayCounter& dc = Actual365Fixed());
 
+        //! Construct from global arb-free parameters with discrete dividends
+        EssviVolatilityTermStructure(
+            const Date& referenceDate,
+            const std::vector<Date>& dates,
+            const std::vector<Real>& rhos,
+            Real theta1,
+            const std::vector<Real>& as,
+            const std::vector<Real>& cs,
+            Handle<Quote> spot,
+            Handle<YieldTermStructure> riskFreeRate,
+            Handle<YieldTermStructure> dividendYield,
+            DividendSchedule dividends,
+            EssviButterflyCondition::Type bflyType
+                = EssviButterflyCondition::GatheralJacquier,
+            const DayCounter& dc = Actual365Fixed());
+
         //! \name TermStructure interface
         //@{
         Date maxDate() const override;

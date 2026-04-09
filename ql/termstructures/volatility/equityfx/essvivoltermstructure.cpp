@@ -162,6 +162,47 @@ namespace QuantLib {
     }
 
     // =================================================================
+    // Global params constructor with discrete dividends
+    // =================================================================
+
+    EssviVolatilityTermStructure::EssviVolatilityTermStructure(
+            const Date& referenceDate,
+            const std::vector<Date>& dates,
+            const std::vector<Real>& rhos,
+            Real theta1,
+            const std::vector<Real>& as,
+            const std::vector<Real>& cs,
+            Handle<Quote> spot,
+            Handle<YieldTermStructure> riskFreeRate,
+            Handle<YieldTermStructure> dividendYield,
+            DividendSchedule dividends,
+            EssviButterflyCondition::Type bflyType,
+            const DayCounter& dc)
+        : BlackVolatilityTermStructure(referenceDate, Calendar(), Following, dc),
+          surface_(datesToTimes(referenceDate, dates, dc),
+                   [&]() {
+                       EssviGlobalParams gp;
+                       gp.rhos   = rhos;
+                       gp.theta1 = theta1;
+                       gp.as     = as;
+                       gp.cs     = cs;
+                       return gp;
+                   }(),
+                   bflyType),
+          spot_(std::move(spot)),
+          riskFreeRate_(std::move(riskFreeRate)),
+          dividendYield_(std::move(dividendYield)),
+          dividends_(std::move(dividends))
+    {
+        QL_REQUIRE(!spot_.empty(), "spot handle must not be empty");
+        QL_REQUIRE(!riskFreeRate_.empty(), "risk-free rate handle must not be empty");
+        QL_REQUIRE(!dividendYield_.empty(), "dividend yield handle must not be empty");
+        registerWith(spot_);
+        registerWith(riskFreeRate_);
+        registerWith(dividendYield_);
+    }
+
+    // =================================================================
     // TermStructure interface
     // =================================================================
 
