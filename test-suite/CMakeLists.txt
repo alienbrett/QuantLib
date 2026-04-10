@@ -74,6 +74,7 @@ set(QL_TEST_SOURCES
     gaussianquadratures.cpp
     gjrgarchmodel.cpp
     gsr.cpp
+    gsr2.cpp
     hestonmodel.cpp
     hestonslvmodel.cpp
     himalayaoption.cpp
