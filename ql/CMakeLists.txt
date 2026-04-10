@@ -635,6 +635,8 @@ set(QL_SOURCES
     models/shortrate/onefactormodels/vasicek.cpp
     models/shortrate/twofactormodel.cpp
     models/shortrate/twofactormodels/g2.cpp
+    models/shortrate/twofactormodels/gaussian2dmodel.cpp
+    models/shortrate/twofactormodels/gsr2.cpp
     models/volatility/constantestimator.cpp
     models/volatility/garch.cpp
     money.cpp
@@ -734,6 +736,7 @@ set(QL_SOURCES
     pricingengines/swaption/gaussian1dfloatfloatswaptionengine.cpp
     pricingengines/swaption/gaussian1djamshidianswaptionengine.cpp
     pricingengines/swaption/gaussian1dnonstandardswaptionengine.cpp
+    pricingengines/swaption/gaussian2dnonstandardswaptionengine.cpp
     pricingengines/swaption/gaussian1dswaptionengine.cpp
     pricingengines/swaption/jamshidianswaptionengine.cpp
     pricingengines/swaption/treeswaptionengine.cpp
@@ -1855,6 +1858,8 @@ set(QL_HEADERS
     models/shortrate/onefactormodels/vasicek.hpp
     models/shortrate/twofactormodel.hpp
     models/shortrate/twofactormodels/g2.hpp
+    models/shortrate/twofactormodels/gaussian2dmodel.hpp
+    models/shortrate/twofactormodels/gsr2.hpp
     models/volatility/constantestimator.hpp
     models/volatility/garch.hpp
     models/volatility/garmanklass.hpp
@@ -1979,6 +1984,7 @@ set(QL_HEADERS
     pricingengines/swaption/gaussian1dfloatfloatswaptionengine.hpp
     pricingengines/swaption/gaussian1djamshidianswaptionengine.hpp
     pricingengines/swaption/gaussian1dnonstandardswaptionengine.hpp
+    pricingengines/swaption/gaussian2dnonstandardswaptionengine.hpp
     pricingengines/swaption/gaussian1dswaptionengine.hpp
     pricingengines/swaption/jamshidianswaptionengine.hpp
     pricingengines/swaption/treeswaptionengine.hpp
