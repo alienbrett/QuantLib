@@ -92,45 +92,143 @@ namespace QuantLib {
                   });
 
         // -----------------------------------------------------------------
-        // Leisen-Reimer tree parameters (odd number of steps required)
+        // Leisen-Reimer tree geometry (odd number of steps required).
+        // up/down/d2 use terminal flat rates — they set the recombining
+        // grid and LR strike-centering.  Per-step probabilities and
+        // discounts are derived below from the actual term structures
+        // to eliminate flat-rate forward bias at intermediate nodes.
         // -----------------------------------------------------------------
         Size N = (timeSteps_ % 2 == 0) ? timeSteps_ + 1 : timeSteps_;
-        Time dt = T / N;
+        Time dt = T / N;  // average dt — for LR geometry only
 
         Real variance     = sigma * sigma * T;
         Real sqrtVar      = std::sqrt(variance);
-        // Log-space drift per step: matches process->drift(0, x0) * dt
+        // Terminal drift — for LR geometry only
         Real driftPerStep = (r - q - 0.5 * sigma * sigma) * dt;
         Real ermqdt       = std::exp(driftPerStep + 0.5 * variance / N);
 
         Real d2 = (std::log(S0 / K) + driftPerStep * N) / sqrtVar;
-        Real pu = PeizerPrattMethod2Inversion(d2, N);
-        Real pd = 1.0 - pu;
+        Real pu_lr = PeizerPrattMethod2Inversion(d2, N);
         Real pdash = PeizerPrattMethod2Inversion(d2 + sqrtVar, N);
-        Real up   = ermqdt * pdash / pu;
-        Real down = (ermqdt - pu * up) / pd;
-        Real disc = std::exp(-r * dt);
+        Real up   = ermqdt * pdash / pu_lr;
+        Real down = (ermqdt - pu_lr * up) / (1.0 - pu_lr);
 
         QL_ENSURE(up > down,
                   "LR tree: up (" << up << ") must exceed down (" << down << ")");
 
         // -----------------------------------------------------------------
-        // Map ex-div dates to nearest tree step (merge if colliding)
+        // Non-uniform time grid: insert exact ex-dividend dates as
+        // mandatory nodes, then fill in uniform sub-steps within each
+        // segment.  This eliminates snapping error that causes erratic
+        // convergence with multiple dividends.  Total step count stays
+        // at N; only the per-step dt varies.
         // -----------------------------------------------------------------
+        std::vector<Time> stepTimes(N + 1);
         std::vector<Size> divStep;
         std::vector<Real> divAmt;
-        for (const auto& d : cashDivs) {
-            Size s = std::max<Size>(
-                1, std::min<Size>(
-                    static_cast<Size>(std::round(d.t / dt)), N - 1));
-            if (!divStep.empty() && divStep.back() == s)
-                divAmt.back() += d.amount;
-            else {
-                divStep.push_back(s);
-                divAmt.push_back(d.amount);
+
+        if (cashDivs.empty()) {
+            // Uniform grid — no dividends to align
+            for (Size k = 0; k <= N; ++k)
+                stepTimes[k] = k * dt;
+        } else {
+            // Build segment breakpoints: [0, t_d1, t_d2, ..., T]
+            std::vector<Time> breaks;
+            breaks.push_back(0.0);
+            for (const auto& d : cashDivs)
+                if (d.t > 1e-10 && d.t < T - 1e-10)
+                    breaks.push_back(d.t);
+            breaks.push_back(T);
+
+            Size nSeg = breaks.size() - 1;
+
+            // Allocate steps to each segment proportional to duration,
+            // minimum 2 per segment to avoid degenerate single-step
+            // segments that can't support interpolation.
+            std::vector<Size> segSteps(nSeg);
+            Size minPerSeg = 2;
+            Size reserved = minPerSeg * nSeg;
+            QL_REQUIRE(N >= reserved,
+                       "VN tree: need at least " << reserved
+                       << " steps for " << nSeg << " segments, got " << N);
+            Size pool = N - reserved;
+            Size allocated = 0;
+            for (Size s = 0; s < nSeg; ++s) {
+                Real frac = (breaks[s+1] - breaks[s]) / T;
+                Size alloc = static_cast<Size>(std::round(pool * frac));
+                segSteps[s] = minPerSeg + alloc;
+                allocated += alloc;
+            }
+            // Reconcile rounding: give/take from longest segment
+            Size longest = 0;
+            for (Size s = 1; s < nSeg; ++s)
+                if (breaks[s+1] - breaks[s] > breaks[longest+1] - breaks[longest])
+                    longest = s;
+            if (allocated < pool)
+                segSteps[longest] += (pool - allocated);
+            else if (allocated > pool && segSteps[longest] > minPerSeg + (allocated - pool))
+                segSteps[longest] -= (allocated - pool);
+
+            // Fill in step times: uniform within each segment
+            Size idx = 0;
+            stepTimes[0] = 0.0;
+            for (Size s = 0; s < nSeg; ++s) {
+                Time segStart = breaks[s];
+                Time segLen = breaks[s+1] - breaks[s];
+                Time segDt = segLen / segSteps[s];
+                for (Size k = 1; k <= segSteps[s]; ++k)
+                    stepTimes[++idx] = segStart + k * segDt;
+            }
+
+            // Map dividends to their exact step indices (segment boundaries)
+            for (Size di = 0; di < cashDivs.size(); ++di) {
+                Time td = cashDivs[di].t;
+                // Find the step index at this dividend time
+                auto it = std::lower_bound(
+                    stepTimes.begin(), stepTimes.end(), td - 1e-10);
+                Size s = static_cast<Size>(
+                    std::distance(stepTimes.begin(), it));
+                // Clamp to [1, N-1]
+                s = std::max<Size>(1, std::min<Size>(s, N - 1));
+                if (!divStep.empty() && divStep.back() == s)
+                    divAmt.back() += cashDivs[di].amount;
+                else {
+                    divStep.push_back(s);
+                    divAmt.push_back(cashDivs[di].amount);
+                }
             }
         }
         Size nDiv = divStep.size();
+
+        // -----------------------------------------------------------------
+        // Per-step forward rates from actual term structures.
+        // Precompute discount factors at each (non-uniform) step time,
+        // then derive local growth/discount per step.  This matches
+        // intermediate-node forwards to the true term structure.
+        // -----------------------------------------------------------------
+        std::vector<Real> dfRf(N + 1), dfQ(N + 1);
+        dfRf[0] = dfQ[0] = 1.0;
+        for (Size k = 1; k <= N; ++k) {
+            dfRf[k] = process_->riskFreeRate()->discount(stepTimes[k]);
+            dfQ[k]  = process_->dividendYield()->discount(stepTimes[k]);
+        }
+
+        std::vector<Real> discStep(N), puStep(N), pdStep(N);
+        for (Size k = 0; k < N; ++k) {
+            // One-step risk-free discount: df(t_{k+1}) / df(t_k)
+            discStep[k] = dfRf[k + 1] / dfRf[k];
+            // One-step forward growth of stock: F(t_{k+1}) / F(t_k)
+            Real growth = (dfQ[k + 1] * dfRf[k]) / (dfQ[k] * dfRf[k + 1]);
+            // Local risk-neutral probability matching the true forward.
+            // Clamp to (0,1) — can be exceeded when the carry curve has
+            // a proportional dividend jump that creates extreme growth in
+            // a single step (e.g. short DTE near ex-date).  Clamping is
+            // the tree's best approximation; error is localized to one
+            // step and does not introduce arbitrage.
+            puStep[k] = std::max(0.001, std::min(0.999,
+                            (growth - down) / (up - down)));
+            pdStep[k] = 1.0 - puStep[k];
+        }
 
         // -----------------------------------------------------------------
         // Helper: stock price at node (step i, index j)
@@ -171,9 +269,12 @@ namespace QuantLib {
             Size si = static_cast<Size>(i);
 
             // --- standard one-step backward induction ---
+            // Uses per-step discount and probabilities from actual term
+            // structures (not flat rates) to match local forwards.
             Array newV(si + 1);
+            Real di = discStep[si], pui = puStep[si], pdi = pdStep[si];
             for (Size j = 0; j <= si; ++j)
-                newV[j] = disc * (pd * V[j] + pu * V[j + 1]);
+                newV[j] = di * (pdi * V[j] + pui * V[j + 1]);
 
             // --- VN interpolation if this step is an ex-div date ---
             if (divIdx > 0 && divStep[divIdx - 1] == si) {
@@ -217,7 +318,7 @@ namespace QuantLib {
 
             // --- early exercise (American) ---
             if (isAmerican) {
-                Time stepTime = si * dt;
+                Time stepTime = stepTimes[si];
                 if (stepTime >= earliestExercise) {
                     for (Size j = 0; j <= si; ++j)
                         newV[j] = std::max(newV[j],
