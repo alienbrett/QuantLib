@@ -112,6 +112,16 @@ namespace QuantLib {
                 = EssviButterflyCondition::GatheralJacquier) const;
         //@}
 
+        //! \name Chain Jacobian
+        //@{
+        std::vector<Real> chainJacobian(
+            const DualWingEssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond
+                = EssviButterflyCondition::GatheralJacquier) const {
+            return surface_.chainJacobian(gp, bflyCond);
+        }
+        //@}
+
         void accept(AcyclicVisitor&) override;
 
       protected:

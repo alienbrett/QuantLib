@@ -169,6 +169,19 @@ namespace QuantLib {
                 = EssviButterflyCondition::GatheralJacquier) const;
         //@}
 
+        //! \name Chain Jacobian (Mingone forward-mode AD)
+        //@{
+        /*! d(theta,psi)/d(global_params) via the Mingone product-of-intervals chain.
+            Returns flat vector of length 2*N*P (dTheta block then dPsi block).
+        */
+        std::vector<Real> chainJacobian(
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond
+                = EssviButterflyCondition::GatheralJacquier) const {
+            return surface_.chainJacobian(gp, bflyCond);
+        }
+        //@}
+
         //! \name Visitability
         //@{
         void accept(AcyclicVisitor&) override;
