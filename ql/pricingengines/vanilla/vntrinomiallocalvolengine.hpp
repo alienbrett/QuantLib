@@ -48,15 +48,25 @@ namespace QuantLib {
     */
     class VNTrinomialLocalVolEngine : public VanillaOption::engine {
       public:
+        //! Standard: extracts local vol from process (generic Dupire)
         VNTrinomialLocalVolEngine(
             ext::shared_ptr<GeneralizedBlackScholesProcess> process,
             DividendSchedule dividends,
             Size timeSteps);
+
+        //! Fast path: uses an explicit local vol surface (e.g. EssviLocalVolSurface)
+        VNTrinomialLocalVolEngine(
+            ext::shared_ptr<GeneralizedBlackScholesProcess> process,
+            DividendSchedule dividends,
+            Size timeSteps,
+            ext::shared_ptr<LocalVolTermStructure> localVol);
+
         void calculate() const override;
       private:
         ext::shared_ptr<GeneralizedBlackScholesProcess> process_;
         DividendSchedule dividends_;
         Size timeSteps_;
+        ext::shared_ptr<LocalVolTermStructure> explicitLocalVol_;
     };
 
 }

@@ -22,6 +22,21 @@ namespace QuantLib {
         registerWith(process_);
     }
 
+    VNTrinomialLocalVolEngine::VNTrinomialLocalVolEngine(
+        ext::shared_ptr<GeneralizedBlackScholesProcess> process,
+        DividendSchedule dividends,
+        Size timeSteps,
+        ext::shared_ptr<LocalVolTermStructure> localVol)
+    : process_(std::move(process)),
+      dividends_(std::move(dividends)),
+      timeSteps_(timeSteps),
+      explicitLocalVol_(std::move(localVol)) {
+        QL_REQUIRE(timeSteps >= 3,
+                   "at least 3 time steps required, "
+                   << timeSteps << " provided");
+        registerWith(process_);
+    }
+
     void VNTrinomialLocalVolEngine::calculate() const {
 
         DayCounter rfdc  = process_->riskFreeRate()->dayCounter();
@@ -52,8 +67,12 @@ namespace QuantLib {
             earliestExercise = rfdc.yearFraction(
                 referenceDate, arguments_.exercise->date(0));
 
-        // Local vol surface from the process
-        auto lvSurface = process_->localVolatility().currentLink();
+        // Local vol surface: use explicit surface if provided (fast path
+        // for analytic local vol, e.g. EssviLocalVolSurface), otherwise
+        // fall back to process's generic Dupire extraction.
+        auto lvSurface = explicitLocalVol_
+            ? explicitLocalVol_
+            : process_->localVolatility().currentLink();
 
         // -----------------------------------------------------------------
         // Collect discrete cash dividends
