@@ -759,6 +759,7 @@ set(QL_SOURCES
     pricingengines/vanilla/cashdividendeuropeanengine.cpp
     pricingengines/vanilla/discretizedvanillaoption.cpp
     pricingengines/vanilla/vnbinomialengine.cpp
+    pricingengines/vanilla/vntrinomiallocalvolengine.cpp
     pricingengines/vanilla/exponentialfittinghestonengine.cpp
     pricingengines/vanilla/fdbatesvanillaengine.cpp
     pricingengines/vanilla/fdblackscholesvanillaengine.cpp
@@ -2008,6 +2009,7 @@ set(QL_HEADERS
     pricingengines/vanilla/coshestonengine.hpp
     pricingengines/vanilla/discretizedvanillaoption.hpp
     pricingengines/vanilla/vnbinomialengine.hpp
+    pricingengines/vanilla/vntrinomiallocalvolengine.hpp
     pricingengines/vanilla/exponentialfittinghestonengine.hpp
     pricingengines/vanilla/fdbatesvanillaengine.hpp
     pricingengines/vanilla/fdblackscholesvanillaengine.hpp
