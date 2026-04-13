@@ -692,6 +692,7 @@ set(QL_SOURCES
     pricingengines/bond/bondfunctions.cpp
     pricingengines/bond/discountingbondengine.cpp
     pricingengines/bond/discretizedconvertible.cpp
+    pricingengines/bond/g2copulabondoptionengine.cpp
     pricingengines/bond/riskybondengine.cpp
     pricingengines/capfloor/analyticcapfloorengine.cpp
     pricingengines/capfloor/bacheliercapfloorengine.cpp
@@ -1930,6 +1931,7 @@ set(QL_HEADERS
     pricingengines/bond/bondfunctions.hpp
     pricingengines/bond/discountingbondengine.hpp
     pricingengines/bond/discretizedconvertible.hpp
+    pricingengines/bond/g2copulabondoptionengine.hpp
     pricingengines/bond/riskybondengine.hpp
     pricingengines/capfloor/analyticcapfloorengine.hpp
     pricingengines/capfloor/bacheliercapfloorengine.hpp

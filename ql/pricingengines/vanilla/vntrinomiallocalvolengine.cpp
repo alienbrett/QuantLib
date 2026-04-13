@@ -91,11 +91,29 @@ namespace QuantLib {
                   });
 
         // -----------------------------------------------------------------
-        // Trinomial grid geometry.
-        // Log-price grid: x_j = ln(S0) + j * dx, j = -N ... +N
-        // dx = sigmaRef * sqrt(3 * dt) — standard choice ensuring
-        // probabilities stay in (0,1) when local vol ≈ sigmaRef.
-        // At step k there are 2k+1 nodes (j = -k ... +k).
+        // Trinomial grid geometry with adaptive branching.
+        //
+        // Log-price grid: x_j = ln(S0) + j * dx
+        // dx = σ_ref * √(3dt) — fine ATM spacing for best accuracy
+        //   near the strike.
+        //
+        // Standard trinomial: branch j → {j-1, j, j+1}.
+        // Problem: when σ_loc > √3·σ_ref, the mid-probability pm goes
+        // negative.  Clamping pm destroys variance matching → systematic
+        // bias that doesn't converge away with more steps.
+        //
+        // Fix: adaptive branching.  At each node, compute stretch factor
+        //   k = max(1, ceil(√(σ²dt / dx²)))
+        // and branch j → {j-k, j, j+k}.  With effective spacing a=k·dx:
+        //   pu = (σ²dt + μ² + μa) / (2a²)
+        //   pd = (σ²dt + μ² - μa) / (2a²)
+        //   pm = 1 - (σ²dt + μ²) / a²
+        // which is always ≥ 0 by construction.
+        //
+        // Tree width at step i = i·K where K is the global max stretch.
+        // K is determined by probing the local vol surface at startup.
+        // The tree stays recombining — all children are on the same
+        // uniform dx grid.
         // -----------------------------------------------------------------
         Size N = timeSteps_;
         Time dt = T / N;
@@ -104,10 +122,35 @@ namespace QuantLib {
         QL_ENSURE(dx > 0.0, "grid spacing dx must be positive "
                   "(sigma=" << sigmaRef << ", dt=" << dt << ")");
 
+        // Probe local vol to determine global max stretch K.
+        Volatility sigMax = sigmaRef;
+        {
+            Real range = 5.0 * sigmaRef * std::sqrt(T);
+            Real logProbes[] = {-range, -0.7*range, -0.4*range, 0.0,
+                                 0.4*range, 0.7*range, range};
+            Time timeProbes[] = {0.1*T, 0.3*T, 0.6*T, 0.9*T};
+            for (Time tp : timeProbes) {
+                if (tp < 1e-6) tp = 1e-6;
+                for (Real lp : logProbes) {
+                    Real Sp = S0 * std::exp(lp);
+                    if (Sp <= 0.0) continue;
+                    try {
+                        Volatility v = lvSurface->localVol(tp, Sp, true);
+                        sigMax = std::max(sigMax, v);
+                    } catch (...) {}
+                }
+            }
+            for (Time tp : timeProbes) {
+                if (tp < 1e-6) tp = 1e-6;
+                try {
+                    Volatility v = lvSurface->localVol(tp, K, true);
+                    sigMax = std::max(sigMax, v);
+                } catch (...) {}
+            }
+        }
+
         Real lnS0 = std::log(S0);
 
-        // Stock price at node (step k, index j) where j in [-k, k]
-        // Stored with offset: array index = j + k
         auto logPrice = [&](Integer j) -> Real {
             return lnS0 + j * dx;
         };
@@ -207,16 +250,30 @@ namespace QuantLib {
         }
 
         // -----------------------------------------------------------------
-        // Terminal payoff: step N has 2N+1 nodes, j = -N ... +N
-        // Array index = j + N
+        // Adaptive branching: global max stretch factor KK.
+        //
+        // KK determines tree width at step i: nodes from -i*KK to +i*KK.
+        // Computed from max local vol across the pricing-relevant range
+        // and the worst-case dt (non-uniform grid may have longer steps).
+        // +1 margin for probing gaps and drift contribution.
         // -----------------------------------------------------------------
-        Size termNodes = 2 * N + 1;
-        Array V(termNodes);
-        for (Integer j = -(Integer)N; j <= (Integer)N; ++j)
-            V[j + N] = (*payoff)(stockPrice(j));
+        Real maxDt = *std::max_element(dtStep.begin(), dtStep.end());
+        Integer KK = std::max(Integer(1),
+            (Integer)std::ceil(
+                std::sqrt(sigMax * sigMax * maxDt / (dx * dx))));
+        KK += 1;  // safety margin
 
         // -----------------------------------------------------------------
-        // Backward induction with per-node local vol probabilities
+        // Terminal payoff: step N has nodes j = -N*KK ... +N*KK
+        // -----------------------------------------------------------------
+        Integer termHalf = static_cast<Integer>(N) * KK;
+        Size termNodes = 2 * termHalf + 1;
+        Array V(termNodes);
+        for (Integer j = -termHalf; j <= termHalf; ++j)
+            V[j + termHalf] = (*payoff)(stockPrice(j));
+
+        // -----------------------------------------------------------------
+        // Backward induction with per-node adaptive branching
         // and VN dividend interpolation
         // -----------------------------------------------------------------
         Size divIdx = nDiv;
@@ -229,23 +286,21 @@ namespace QuantLib {
 
         for (Integer i = N - 1; i >= 0; --i) {
             Size si = static_cast<Size>(i);
-            Size nNodes = 2 * si + 1;  // nodes at step si: j = -si ... +si
+            Integer halfWidth = static_cast<Integer>(si) * KK;
+            Size nNodes = 2 * halfWidth + 1;
+            Integer childHalf = static_cast<Integer>(si + 1) * KK;
 
             Real disc = discStep[si];
             Real growth = growthStep[si];
             Time dtk = dtStep[si];
             Time tMid = 0.5 * (stepTimes[si] + stepTimes[si + 1]);
 
-            // ln(growth) = (r-q)*dt from term structures.
-            // Log-space drift at each node needs Ito correction:
-            //   mu(S)*dt = ln(growth) - 0.5*σ_local(t,S)²*dt
-            // Applied per-node below.
             Real lnGrowthRaw = std::log(growth);
 
             Array newV(nNodes);
 
-            for (Integer j = -(Integer)si; j <= (Integer)si; ++j) {
-                Size idx = j + si;  // array index in newV
+            for (Integer j = -halfWidth; j <= halfWidth; ++j) {
+                Size idx = j + halfWidth;
                 Real Sj = stockPrice(j);
 
                 // Query local vol at this node
@@ -256,45 +311,52 @@ namespace QuantLib {
                     sigLoc = sigmaRef;
                 }
 
-                // Trinomial probabilities matching forward + variance in log-space:
-                //   x transitions to x+dx (up), x (mid), x-dx (down)
-                //   mu = ln(growth) - 0.5*sigLoc^2*dt  (Ito-corrected drift)
-                //   E[Δx] = mu*dt     => pu*dx - pd*dx = mu*dt
-                //   Var[Δx] = sig^2*dt => pu*dx^2 + pd*dx^2 = sig^2*dt + (mu*dt)^2
-                //   pu + pm + pd = 1
-                //
-                // Solving:
-                //   pu = (sig^2*dt + mu² + mu*dx) / (2*dx^2)
-                //   pd = (sig^2*dt + mu² - mu*dx) / (2*dx^2)
-                //   pm = 1 - pu - pd
                 Real localVar = sigLoc * sigLoc * dtk;
                 Real mu = lnGrowthRaw - 0.5 * sigLoc * sigLoc * dtk;
-                Real dx2 = dx * dx;
                 Real mu2 = mu * mu;
+                Real varTerm = localVar + mu2;
 
-                Real pu = (localVar + mu2 + mu * dx) / (2.0 * dx2);
-                Real pd = (localVar + mu2 - mu * dx) / (2.0 * dx2);
+                // Adaptive stretch: choose kk so pm ≥ 0
+                // pm = 1 - varTerm/(kk²dx²) ≥ 0  =>  kk ≥ √(varTerm/dx²)
+                Integer kk = 1;
+                Real dx2 = dx * dx;
+                if (varTerm > dx2) {
+                    kk = (Integer)std::ceil(std::sqrt(varTerm / dx2));
+                }
+                // Cap at global max (shouldn't bind if probe was accurate)
+                kk = std::min(kk, KK);
+
+                Real a = kk * dx;
+                Real a2 = a * a;
+
+                Real pu = (varTerm + mu * a) / (2.0 * a2);
+                Real pd = (varTerm - mu * a) / (2.0 * a2);
                 Real pm = 1.0 - pu - pd;
 
-                // Clamp probabilities to avoid negative values at extreme nodes
-                pu = std::max(0.0, std::min(1.0, pu));
-                pd = std::max(0.0, std::min(1.0, pd));
-                pm = std::max(0.0, 1.0 - pu - pd);
-                // Renormalize after clamping
-                Real psum = pu + pm + pd;
-                if (psum > 0.0) {
-                    pu /= psum; pm /= psum; pd /= psum;
-                } else {
-                    pu = pd = 0.0; pm = 1.0;
+                // Safety: pm should be ≥ 0 by construction.  If floating
+                // point puts it slightly negative, nudge.
+                if (pm < 0.0) {
+                    pm = 0.0;
+                    Real psum = pu + pd;
+                    if (psum > 0.0) { pu /= psum; pd /= psum; }
                 }
 
-                // V at step (si+1) has 2*(si+1)+1 nodes, index = j + (si+1)
-                // Transitions: j+1 (up), j (mid), j-1 (down) in the (si+1) grid
-                Size idxUp  = (j + 1) + (si + 1);
-                Size idxMid = j + (si + 1);
-                Size idxDn  = (j - 1) + (si + 1);
+                // Child node indices in step si+1 array
+                Integer jUp  = j + kk;
+                Integer jMid = j;
+                Integer jDn  = j - kk;
 
-                newV[idx] = disc * (pu * V[idxUp] + pm * V[idxMid] + pd * V[idxDn]);
+                // Clamp to child bounds (only at very edge of tree)
+                jUp  = std::min(jUp, childHalf);
+                jDn  = std::max(jDn, -childHalf);
+
+                Size idxUp  = jUp  + childHalf;
+                Size idxMid = jMid + childHalf;
+                Size idxDn  = jDn  + childHalf;
+
+                newV[idx] = disc * (pu * V[idxUp]
+                                  + pm * V[idxMid]
+                                  + pd * V[idxDn]);
             }
 
             // --- VN interpolation at ex-dividend dates ---
@@ -302,10 +364,9 @@ namespace QuantLib {
                 --divIdx;
                 Real D = divAmt[divIdx];
 
-                // Stock prices at this step (monotonically increasing)
                 std::vector<Real> prices(nNodes);
-                for (Integer j = -(Integer)si; j <= (Integer)si; ++j)
-                    prices[j + si] = stockPrice(j);
+                for (Integer j = -halfWidth; j <= halfWidth; ++j)
+                    prices[j + halfWidth] = stockPrice(j);
 
                 Array adjV(nNodes);
                 for (Size idx = 0; idx < nNodes; ++idx) {
@@ -337,8 +398,8 @@ namespace QuantLib {
             if (isAmerican) {
                 Time stepTime = stepTimes[si];
                 if (stepTime >= earliestExercise) {
-                    for (Integer j = -(Integer)si; j <= (Integer)si; ++j) {
-                        Size idx = j + si;
+                    for (Integer j = -halfWidth; j <= halfWidth; ++j) {
+                        Size idx = j + halfWidth;
                         newV[idx] = std::max(newV[idx],
                                              (*payoff)(stockPrice(j)));
                     }
@@ -346,15 +407,19 @@ namespace QuantLib {
             }
 
             // --- capture nodes for Greeks ---
+            // j = -2, 0, +2 always exist at step 2 (halfWidth = 2*KK ≥ 2)
             if (si == 2) {
-                // j = -2, 0, +2 (every other node for gamma)
-                p2d = newV[0]; p2m = newV[2]; p2u = newV[4];
+                p2d = newV[(-2) + halfWidth];
+                p2m = newV[0 + halfWidth];
+                p2u = newV[2 + halfWidth];
                 s2d = stockPrice(-2);
                 s2m = stockPrice(0);
                 s2u = stockPrice(2);
             }
+            // j = -1, +1 always exist at step 1 (halfWidth = KK ≥ 1)
             if (si == 1) {
-                p1d = newV[0]; p1u = newV[2];
+                p1d = newV[(-1) + halfWidth];
+                p1u = newV[1 + halfWidth];
                 s1d = stockPrice(-1);
                 s1u = stockPrice(1);
             }
@@ -363,7 +428,7 @@ namespace QuantLib {
         }
 
         // -----------------------------------------------------------------
-        // Results — V has 1 element (the root node)
+        // Results — V has 1 element (root: halfWidth = 0*KK = 0)
         // -----------------------------------------------------------------
         results_.value = V[0];
 
