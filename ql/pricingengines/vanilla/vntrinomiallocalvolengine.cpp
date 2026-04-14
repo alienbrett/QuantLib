@@ -37,6 +37,23 @@ namespace QuantLib {
         registerWith(process_);
     }
 
+    VNTrinomialLocalVolEngine::VNTrinomialLocalVolEngine(
+        ext::shared_ptr<GeneralizedBlackScholesProcess> process,
+        DividendSchedule dividends,
+        Size timeSteps,
+        ext::shared_ptr<LocalVolTermStructure> localVol,
+        Size lvGridStride)
+    : process_(std::move(process)),
+      dividends_(std::move(dividends)),
+      timeSteps_(timeSteps),
+      explicitLocalVol_(std::move(localVol)),
+      lvGridStride_(lvGridStride) {
+        QL_REQUIRE(timeSteps >= 3,
+                   "at least 3 time steps required, "
+                   << timeSteps << " provided");
+        registerWith(process_);
+    }
+
     void VNTrinomialLocalVolEngine::calculate() const {
 
         DayCounter rfdc  = process_->riskFreeRate()->dayCounter();
@@ -67,9 +84,6 @@ namespace QuantLib {
             earliestExercise = rfdc.yearFraction(
                 referenceDate, arguments_.exercise->date(0));
 
-        // Local vol surface: use explicit surface if provided (fast path
-        // for analytic local vol, e.g. EssviLocalVolSurface), otherwise
-        // fall back to process's generic Dupire extraction.
         auto lvSurface = explicitLocalVol_
             ? explicitLocalVol_
             : process_->localVolatility().currentLink();
@@ -92,28 +106,6 @@ namespace QuantLib {
 
         // -----------------------------------------------------------------
         // Trinomial grid geometry with adaptive branching.
-        //
-        // Log-price grid: x_j = ln(S0) + j * dx
-        // dx = σ_ref * √(3dt) — fine ATM spacing for best accuracy
-        //   near the strike.
-        //
-        // Standard trinomial: branch j → {j-1, j, j+1}.
-        // Problem: when σ_loc > √3·σ_ref, the mid-probability pm goes
-        // negative.  Clamping pm destroys variance matching → systematic
-        // bias that doesn't converge away with more steps.
-        //
-        // Fix: adaptive branching.  At each node, compute stretch factor
-        //   k = max(1, ceil(√(σ²dt / dx²)))
-        // and branch j → {j-k, j, j+k}.  With effective spacing a=k·dx:
-        //   pu = (σ²dt + μ² + μa) / (2a²)
-        //   pd = (σ²dt + μ² - μa) / (2a²)
-        //   pm = 1 - (σ²dt + μ²) / a²
-        // which is always ≥ 0 by construction.
-        //
-        // Tree width at step i = i·K where K is the global max stretch.
-        // K is determined by probing the local vol surface at startup.
-        // The tree stays recombining — all children are on the same
-        // uniform dx grid.
         // -----------------------------------------------------------------
         Size N = timeSteps_;
         Time dt = T / N;
@@ -160,7 +152,6 @@ namespace QuantLib {
 
         // -----------------------------------------------------------------
         // Non-uniform time grid with ex-div date alignment
-        // (same logic as VNBinomialVanillaEngine)
         // -----------------------------------------------------------------
         std::vector<Time> stepTimes(N + 1);
         std::vector<Size> divStep;
@@ -228,13 +219,12 @@ namespace QuantLib {
         }
         Size nDiv = divStep.size();
 
-        // Recompute dt per step from the (possibly non-uniform) grid
         std::vector<Time> dtStep(N);
         for (Size k = 0; k < N; ++k)
             dtStep[k] = stepTimes[k + 1] - stepTimes[k];
 
         // -----------------------------------------------------------------
-        // Per-step discount factors from actual term structures
+        // Per-step discount factors
         // -----------------------------------------------------------------
         std::vector<Real> dfRf(N + 1), dfQ(N + 1);
         dfRf[0] = dfQ[0] = 1.0;
@@ -251,11 +241,6 @@ namespace QuantLib {
 
         // -----------------------------------------------------------------
         // Adaptive branching: global max stretch factor KK.
-        //
-        // KK determines tree width at step i: nodes from -i*KK to +i*KK.
-        // Computed from max local vol across the pricing-relevant range
-        // and the worst-case dt (non-uniform grid may have longer steps).
-        // +1 margin for probing gaps and drift contribution.
         // -----------------------------------------------------------------
         Real maxDt = *std::max_element(dtStep.begin(), dtStep.end());
         Integer KK = std::max(Integer(1),
@@ -264,7 +249,105 @@ namespace QuantLib {
         KK += 1;  // safety margin
 
         // -----------------------------------------------------------------
-        // Terminal payoff: step N has nodes j = -N*KK ... +N*KK
+        // Coarse-grid local vol precomputation (when lvGridStride_ > 0).
+        //
+        // For each time step, evaluate local vol at every stride-th
+        // tree node and store.  During backward induction, linearly
+        // interpolate between the two nearest grid points.
+        //
+        // Cost: O(KN²/S) evaluations vs O(KN²) exact, where S=stride.
+        // Interpolation error is negligible for smooth surfaces (eSSVI).
+        // -----------------------------------------------------------------
+        Size stride = lvGridStride_;
+        bool useGrid = (stride > 0);
+
+        // Per-step grid: lvGrid_[si] has local vols at j = jMin, jMin+stride, ...
+        // lvGridJMin_[si] = first j in the grid for step si
+        // lvGridSize_[si] = number of grid points for step si
+        std::vector<std::vector<Volatility>> lvGrid_;
+        std::vector<Integer> lvGridJMin_;
+
+        if (useGrid) {
+            lvGrid_.resize(N);
+            lvGridJMin_.resize(N);
+            Integer iStride = static_cast<Integer>(stride);
+            for (Size si = 0; si < N; ++si) {
+                Integer halfW = static_cast<Integer>(si) * KK;
+                Time tMid = 0.5 * (stepTimes[si] + stepTimes[si + 1]);
+
+                // Align grid to stride boundaries so spacing is truly
+                // uniform — required for correct Lagrange interpolation.
+                // Round halfW up to next multiple of stride.
+                Integer halfAligned = ((halfW + iStride - 1) / iStride) * iStride;
+                Integer jMin = -halfAligned;
+                Integer jMax =  halfAligned;
+                lvGridJMin_[si] = jMin;
+
+                Size nGrid = static_cast<Size>((jMax - jMin) / iStride) + 1;
+                lvGrid_[si].resize(nGrid);
+
+                for (Size g = 0; g < nGrid; ++g) {
+                    Integer j = jMin + static_cast<Integer>(g) * iStride;
+                    Real Sj = stockPrice(j);
+                    try {
+                        lvGrid_[si][g] = lvSurface->localVol(tMid, Sj, true);
+                    } catch (...) {
+                        lvGrid_[si][g] = sigmaRef;
+                    }
+                }
+            }
+        }
+
+        // Local vol lookup: cubic Lagrange interpolation or exact evaluation.
+        // Cubic (4-point) gives O(h⁴) error vs O(h²) for linear, critical
+        // for eSSVI surfaces with non-trivial curvature.  Falls back to
+        // linear when the per-step grid has < 4 points (early time steps).
+        auto getLocalVol = [&](Size si, Integer j, Time tMid) -> Volatility {
+            if (useGrid) {
+                Integer jMin = lvGridJMin_[si];
+                const auto& grid = lvGrid_[si];
+                Size n = grid.size();
+                Real fIdx = static_cast<Real>(j - jMin)
+                          / static_cast<Real>(stride);
+                if (fIdx < 0.0) fIdx = 0.0;
+                if (fIdx > static_cast<Real>(n - 1))
+                    fIdx = static_cast<Real>(n - 1);
+
+                if (n >= 4) {
+                    // Cubic Lagrange interpolation over 4 nearest points.
+                    // Choose i0 so points i0..i0+3 straddle fIdx.
+                    Integer i0 = static_cast<Integer>(fIdx) - 1;
+                    if (i0 < 0) i0 = 0;
+                    if (i0 > static_cast<Integer>(n) - 4)
+                        i0 = static_cast<Integer>(n) - 4;
+                    Real x = fIdx - static_cast<Real>(i0);
+                    // x ∈ [0, 3], interpolation points at x=0,1,2,3
+                    Real x0 = x, x1 = x - 1.0, x2 = x - 2.0, x3 = x - 3.0;
+                    Real L0 = (-x1 * x2 * x3) / 6.0;
+                    Real L1 = ( x0 * x2 * x3) / 2.0;
+                    Real L2 = (-x0 * x1 * x3) / 2.0;
+                    Real L3 = ( x0 * x1 * x2) / 6.0;
+                    return L0 * grid[i0] + L1 * grid[i0+1]
+                         + L2 * grid[i0+2] + L3 * grid[i0+3];
+                } else {
+                    // Linear fallback for small grids
+                    Size lo = static_cast<Size>(fIdx);
+                    if (lo >= n - 1) lo = (n > 1) ? n - 2 : 0;
+                    Real w = fIdx - static_cast<Real>(lo);
+                    return grid[lo] + w * (grid[lo + 1] - grid[lo]);
+                }
+            } else {
+                Real Sj = stockPrice(j);
+                try {
+                    return lvSurface->localVol(tMid, Sj, true);
+                } catch (...) {
+                    return sigmaRef;
+                }
+            }
+        };
+
+        // -----------------------------------------------------------------
+        // Terminal payoff
         // -----------------------------------------------------------------
         Integer termHalf = static_cast<Integer>(N) * KK;
         Size termNodes = 2 * termHalf + 1;
@@ -273,12 +356,10 @@ namespace QuantLib {
             V[j + termHalf] = (*payoff)(stockPrice(j));
 
         // -----------------------------------------------------------------
-        // Backward induction with per-node adaptive branching
-        // and VN dividend interpolation
+        // Backward induction
         // -----------------------------------------------------------------
         Size divIdx = nDiv;
 
-        // Greeks capture: values at steps 1 and 2
         Real p2d = 0, p2m = 0, p2u = 0;
         Real s2d = 0, s2m = 0, s2u = 0;
         Real p1d = 0, p1u = 0;
@@ -301,29 +382,19 @@ namespace QuantLib {
 
             for (Integer j = -halfWidth; j <= halfWidth; ++j) {
                 Size idx = j + halfWidth;
-                Real Sj = stockPrice(j);
 
-                // Query local vol at this node
-                Volatility sigLoc;
-                try {
-                    sigLoc = lvSurface->localVol(tMid, Sj, true);
-                } catch (...) {
-                    sigLoc = sigmaRef;
-                }
+                Volatility sigLoc = getLocalVol(si, j, tMid);
 
                 Real localVar = sigLoc * sigLoc * dtk;
                 Real mu = lnGrowthRaw - 0.5 * sigLoc * sigLoc * dtk;
                 Real mu2 = mu * mu;
                 Real varTerm = localVar + mu2;
 
-                // Adaptive stretch: choose kk so pm ≥ 0
-                // pm = 1 - varTerm/(kk²dx²) ≥ 0  =>  kk ≥ √(varTerm/dx²)
                 Integer kk = 1;
                 Real dx2 = dx * dx;
                 if (varTerm > dx2) {
                     kk = (Integer)std::ceil(std::sqrt(varTerm / dx2));
                 }
-                // Cap at global max (shouldn't bind if probe was accurate)
                 kk = std::min(kk, KK);
 
                 Real a = kk * dx;
@@ -333,25 +404,17 @@ namespace QuantLib {
                 Real pd = (varTerm - mu * a) / (2.0 * a2);
                 Real pm = 1.0 - pu - pd;
 
-                // Safety: pm should be ≥ 0 by construction.  If floating
-                // point puts it slightly negative, nudge.
                 if (pm < 0.0) {
                     pm = 0.0;
                     Real psum = pu + pd;
                     if (psum > 0.0) { pu /= psum; pd /= psum; }
                 }
 
-                // Child node indices in step si+1 array
-                Integer jUp  = j + kk;
-                Integer jMid = j;
-                Integer jDn  = j - kk;
-
-                // Clamp to child bounds (only at very edge of tree)
-                jUp  = std::min(jUp, childHalf);
-                jDn  = std::max(jDn, -childHalf);
+                Integer jUp  = std::min(j + kk, childHalf);
+                Integer jDn  = std::max(j - kk, -childHalf);
 
                 Size idxUp  = jUp  + childHalf;
-                Size idxMid = jMid + childHalf;
+                Size idxMid = j    + childHalf;
                 Size idxDn  = jDn  + childHalf;
 
                 newV[idx] = disc * (pu * V[idxUp]
@@ -407,7 +470,6 @@ namespace QuantLib {
             }
 
             // --- capture nodes for Greeks ---
-            // j = -2, 0, +2 always exist at step 2 (halfWidth = 2*KK ≥ 2)
             if (si == 2) {
                 p2d = newV[(-2) + halfWidth];
                 p2m = newV[0 + halfWidth];
@@ -416,7 +478,6 @@ namespace QuantLib {
                 s2m = stockPrice(0);
                 s2u = stockPrice(2);
             }
-            // j = -1, +1 always exist at step 1 (halfWidth = KK ≥ 1)
             if (si == 1) {
                 p1d = newV[(-1) + halfWidth];
                 p1u = newV[1 + halfWidth];
@@ -428,7 +489,7 @@ namespace QuantLib {
         }
 
         // -----------------------------------------------------------------
-        // Results — V has 1 element (root: halfWidth = 0*KK = 0)
+        // Results
         // -----------------------------------------------------------------
         results_.value = V[0];
 
