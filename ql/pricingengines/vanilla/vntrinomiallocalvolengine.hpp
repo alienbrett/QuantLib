@@ -46,6 +46,12 @@ namespace QuantLib {
         accurate for smooth analytic surfaces (eSSVI) and gives 3-6×
         speedup.
 
+        Break times: the time grid aligns step boundaries with both
+        ex-dividend dates and any user-supplied break times (e.g. vol
+        surface slice dates).  This prevents local vol discontinuities
+        at piecewise-surface boundaries from causing non-monotonic
+        convergence.
+
         \ingroup vanillaengines
     */
     class VNTrinomialLocalVolEngine : public VanillaOption::engine {
@@ -54,14 +60,16 @@ namespace QuantLib {
         VNTrinomialLocalVolEngine(
             ext::shared_ptr<GeneralizedBlackScholesProcess> process,
             DividendSchedule dividends,
-            Size timeSteps);
+            Size timeSteps,
+            std::vector<Time> breakTimes = {});
 
         //! Fast path: uses an explicit local vol surface (e.g. EssviLocalVolSurface)
         VNTrinomialLocalVolEngine(
             ext::shared_ptr<GeneralizedBlackScholesProcess> process,
             DividendSchedule dividends,
             Size timeSteps,
-            ext::shared_ptr<LocalVolTermStructure> localVol);
+            ext::shared_ptr<LocalVolTermStructure> localVol,
+            std::vector<Time> breakTimes = {});
 
         //! Fast path with coarse-grid interpolation (lvGridStride > 0)
         VNTrinomialLocalVolEngine(
@@ -69,7 +77,8 @@ namespace QuantLib {
             DividendSchedule dividends,
             Size timeSteps,
             ext::shared_ptr<LocalVolTermStructure> localVol,
-            Size lvGridStride);
+            Size lvGridStride,
+            std::vector<Time> breakTimes = {});
 
         void calculate() const override;
       private:
@@ -78,6 +87,7 @@ namespace QuantLib {
         Size timeSteps_;
         ext::shared_ptr<LocalVolTermStructure> explicitLocalVol_;
         Size lvGridStride_ = 0;
+        std::vector<Time> breakTimes_;
     };
 
 }

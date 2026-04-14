@@ -12,25 +12,12 @@ namespace QuantLib {
     VNTrinomialLocalVolEngine::VNTrinomialLocalVolEngine(
         ext::shared_ptr<GeneralizedBlackScholesProcess> process,
         DividendSchedule dividends,
-        Size timeSteps)
-    : process_(std::move(process)),
-      dividends_(std::move(dividends)),
-      timeSteps_(timeSteps) {
-        QL_REQUIRE(timeSteps >= 3,
-                   "at least 3 time steps required, "
-                   << timeSteps << " provided");
-        registerWith(process_);
-    }
-
-    VNTrinomialLocalVolEngine::VNTrinomialLocalVolEngine(
-        ext::shared_ptr<GeneralizedBlackScholesProcess> process,
-        DividendSchedule dividends,
         Size timeSteps,
-        ext::shared_ptr<LocalVolTermStructure> localVol)
+        std::vector<Time> breakTimes)
     : process_(std::move(process)),
       dividends_(std::move(dividends)),
       timeSteps_(timeSteps),
-      explicitLocalVol_(std::move(localVol)) {
+      breakTimes_(std::move(breakTimes)) {
         QL_REQUIRE(timeSteps >= 3,
                    "at least 3 time steps required, "
                    << timeSteps << " provided");
@@ -42,12 +29,31 @@ namespace QuantLib {
         DividendSchedule dividends,
         Size timeSteps,
         ext::shared_ptr<LocalVolTermStructure> localVol,
-        Size lvGridStride)
+        std::vector<Time> breakTimes)
     : process_(std::move(process)),
       dividends_(std::move(dividends)),
       timeSteps_(timeSteps),
       explicitLocalVol_(std::move(localVol)),
-      lvGridStride_(lvGridStride) {
+      breakTimes_(std::move(breakTimes)) {
+        QL_REQUIRE(timeSteps >= 3,
+                   "at least 3 time steps required, "
+                   << timeSteps << " provided");
+        registerWith(process_);
+    }
+
+    VNTrinomialLocalVolEngine::VNTrinomialLocalVolEngine(
+        ext::shared_ptr<GeneralizedBlackScholesProcess> process,
+        DividendSchedule dividends,
+        Size timeSteps,
+        ext::shared_ptr<LocalVolTermStructure> localVol,
+        Size lvGridStride,
+        std::vector<Time> breakTimes)
+    : process_(std::move(process)),
+      dividends_(std::move(dividends)),
+      timeSteps_(timeSteps),
+      explicitLocalVol_(std::move(localVol)),
+      lvGridStride_(lvGridStride),
+      breakTimes_(std::move(breakTimes)) {
         QL_REQUIRE(timeSteps >= 3,
                    "at least 3 time steps required, "
                    << timeSteps << " provided");
@@ -151,21 +157,39 @@ namespace QuantLib {
         };
 
         // -----------------------------------------------------------------
-        // Non-uniform time grid with ex-div date alignment
+        // Non-uniform time grid with break-time alignment.
+        //
+        // Break times come from two sources:
+        //   1. Ex-dividend dates (cash dividends → VN interpolation)
+        //   2. User-supplied break times (e.g. vol surface slice dates)
+        // Aligning step boundaries with these times prevents local vol
+        // discontinuities from causing non-monotonic convergence.
         // -----------------------------------------------------------------
         std::vector<Time> stepTimes(N + 1);
         std::vector<Size> divStep;
         std::vector<Real> divAmt;
 
-        if (cashDivs.empty()) {
+        // Collect all break times (dividends + explicit)
+        std::vector<Time> allBreaks;
+        for (const auto& d : cashDivs)
+            if (d.t > 1e-10 && d.t < T - 1e-10)
+                allBreaks.push_back(d.t);
+        for (Time bt : breakTimes_)
+            if (bt > 1e-10 && bt < T - 1e-10)
+                allBreaks.push_back(bt);
+        std::sort(allBreaks.begin(), allBreaks.end());
+        allBreaks.erase(std::unique(allBreaks.begin(), allBreaks.end(),
+            [](Time a, Time b) { return std::abs(a - b) < 1e-10; }),
+            allBreaks.end());
+
+        if (allBreaks.empty()) {
             for (Size k = 0; k <= N; ++k)
                 stepTimes[k] = k * dt;
         } else {
             std::vector<Time> breaks;
             breaks.push_back(0.0);
-            for (const auto& d : cashDivs)
-                if (d.t > 1e-10 && d.t < T - 1e-10)
-                    breaks.push_back(d.t);
+            for (Time bt : allBreaks)
+                breaks.push_back(bt);
             breaks.push_back(T);
 
             Size nSeg = breaks.size() - 1;
