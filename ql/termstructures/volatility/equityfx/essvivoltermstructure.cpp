@@ -232,6 +232,25 @@ namespace QuantLib {
     }
 
     // =================================================================
+    // Mutators
+    // =================================================================
+
+    void EssviVolatilityTermStructure::setGlobalParams(
+            const std::vector<Real>& rhos,
+            Real theta1,
+            const std::vector<Real>& as,
+            const std::vector<Real>& cs,
+            EssviButterflyCondition::Type bflyType) {
+        EssviGlobalParams gp;
+        gp.rhos   = rhos;
+        gp.theta1 = theta1;
+        gp.as     = as;
+        gp.cs     = cs;
+        surface_.setGlobalParams(gp, bflyType);
+        notifyObservers();
+    }
+
+    // =================================================================
     // Visitability
     // =================================================================
 

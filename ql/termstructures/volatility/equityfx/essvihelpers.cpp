@@ -778,6 +778,20 @@ namespace QuantLib {
     }
 
     // =================================================================
+    // In-place global param update
+    // =================================================================
+
+    void EssviSurface::setGlobalParams(const EssviGlobalParams& gp,
+                                        EssviButterflyCondition::Type bflyCond) {
+        auto newSlices = globalToSlice(gp, bflyCond);
+        QL_REQUIRE(newSlices.size() == T_.size(),
+                   "setGlobalParams: slice count (" << newSlices.size()
+                   << ") != maturity count (" << T_.size() << ")");
+        slices_ = std::move(newSlices);
+        bflyCond_ = bflyCond;
+    }
+
+    // =================================================================
     // Evaluation: slice index
     // =================================================================
 

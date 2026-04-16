@@ -182,6 +182,17 @@ namespace QuantLib {
         }
         //@}
 
+        //! \name Mutators
+        //@{
+        //! Update global params in-place (re-runs globalToSlice, reuses handles/dates).
+        void setGlobalParams(const std::vector<Real>& rhos,
+                             Real theta1,
+                             const std::vector<Real>& as,
+                             const std::vector<Real>& cs,
+                             EssviButterflyCondition::Type bflyType
+                                 = EssviButterflyCondition::GatheralJacquier);
+        //@}
+
         //! \name Visitability
         //@{
         void accept(AcyclicVisitor&) override;

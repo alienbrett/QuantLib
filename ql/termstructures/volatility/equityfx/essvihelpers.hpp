@@ -312,6 +312,11 @@ namespace QuantLib {
                       EssviButterflyCondition::Type cond
                           = EssviButterflyCondition::GatheralJacquier);
 
+        //! Update global params in-place (re-runs globalToSlice, keeps maturities).
+        void setGlobalParams(const EssviGlobalParams& gp,
+                             EssviButterflyCondition::Type bflyCond
+                                 = EssviButterflyCondition::GatheralJacquier);
+
     private:
         EssviSliceParams interpolate(Real t) const;
 
