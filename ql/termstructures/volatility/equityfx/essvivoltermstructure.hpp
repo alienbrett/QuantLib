@@ -167,6 +167,27 @@ namespace QuantLib {
             const EssviGlobalParams& gp,
             EssviButterflyCondition::Type bflyCond
                 = EssviButterflyCondition::GatheralJacquier) const;
+
+        /*! Evaluate blackVol for multiple (time, strike) pairs.  Times
+            are interpolated (or extrapolated) between pillar maturities
+            — no bucketing to a pillar index.  Returns vector of length
+            N = times.size().
+        */
+        std::vector<Real> batchBlackVolAtTimes(
+            const std::vector<Real>& times,
+            const std::vector<Real>& strikes) const;
+
+        /*! Evaluate impliedVolGlobalGradient for multiple observations
+            at arbitrary times.  Interpolates in time between pillars and
+            chains with the Mingone chainJacobian in a single SWIG call.
+            Returns flat row-major matrix: N_obs rows × N_params cols.
+        */
+        std::vector<Real> batchImpliedVolGlobalGradientAtTimes(
+            const std::vector<Real>& times,
+            const std::vector<Real>& strikes,
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond
+                = EssviButterflyCondition::GatheralJacquier) const;
         //@}
 
         //! \name Chain Jacobian (Mingone forward-mode AD)

@@ -399,4 +399,54 @@ namespace QuantLib {
         return J;
     }
 
+    // =================================================================
+    // Batch evaluation at arbitrary times
+    //
+    // Observations pass their actual maturity (no bucketing to pillars).
+    // EssviSurface handles time interpolation + chainJacobian composition.
+    // This wrapper computes the dividend-aware forward per observation.
+    // =================================================================
+
+    std::vector<Real>
+    EssviVolatilityTermStructure::batchBlackVolAtTimes(
+            const std::vector<Real>& times,
+            const std::vector<Real>& strikes) const {
+        const Size nObs = times.size();
+        QL_REQUIRE(strikes.size() == nObs, "strikes size mismatch");
+
+        std::vector<Real> vols(nObs);
+        for (Size i = 0; i < nObs; ++i) {
+            Real t = times[i];
+            QL_REQUIRE(t > 0.0, "time[" << i << "] must be > 0");
+            Real fwd = forward(t);
+            Real k = std::log(strikes[i] / fwd);
+            Real w = surface_.totalVariance(k, t);
+            vols[i] = std::sqrt(w / t);
+        }
+        return vols;
+    }
+
+    std::vector<Real>
+    EssviVolatilityTermStructure::batchImpliedVolGlobalGradientAtTimes(
+            const std::vector<Real>& times,
+            const std::vector<Real>& strikes,
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond) const {
+        const Size nObs = times.size();
+        QL_REQUIRE(strikes.size() == nObs, "strikes size mismatch");
+
+        // Convert (T, K) to (T, k) where k = log(K / F(T))
+        std::vector<Real> ks(nObs);
+        for (Size i = 0; i < nObs; ++i) {
+            Real t = times[i];
+            QL_REQUIRE(t > 0.0, "time[" << i << "] must be > 0");
+            Real fwd = forward(t);
+            ks[i] = std::log(strikes[i] / fwd);
+        }
+
+        // Delegate to EssviSurface — one chainJacobian shared across obs.
+        return surface_.batchImpliedVolGlobalGradientAtTimes(
+            times, ks, gp, bflyCond);
+    }
+
 } // namespace QuantLib

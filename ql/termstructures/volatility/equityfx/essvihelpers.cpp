@@ -719,6 +719,200 @@ namespace QuantLib {
     }
 
     // =================================================================
+    // Interpolation Jacobian: d(interp_params)/d(pillar_params) at time t
+    // =================================================================
+
+    EssviSurface::InterpJacobian EssviSurface::interpJacobian(Real t) const {
+        const Size N = T_.size();
+        InterpJacobian ij;
+
+        // ── Left extrap: t <= T[0] ──
+        if (t <= T_[0]) {
+            Real lambda = t / T_[0];
+            if (lambda < 0.0) lambda = 0.0;
+            ij.s_lo = 0;
+            ij.s_hi = 0;
+            ij.params.theta = lambda * slices_[0].theta;
+            ij.params.psi   = lambda * slices_[0].psi;
+            ij.params.rho   = slices_[0].rho;
+            // Coefs: p* = lambda · p_0  → dp*/dp_0 = lambda
+            // Using s_lo = s_hi = 0 and putting all weight on "lo" so "hi"
+            // contribution is zero (double-counting avoided).
+            ij.c_theta_lo = lambda; ij.c_theta_hi = 0.0;
+            ij.c_psi_lo   = lambda; ij.c_psi_hi   = 0.0;
+            ij.c_rho_direct_lo   = 1.0; ij.c_rho_direct_hi   = 0.0;
+            ij.c_rho_via_psi_lo  = 0.0; ij.c_rho_via_psi_hi  = 0.0;
+            return ij;
+        }
+
+        // ── Right extrap: t >= T[N-1] ──
+        if (t >= T_[N - 1]) {
+            // theta linearly from last interval (matches interpolate())
+            if (N >= 2) {
+                Real dT = T_[N - 1] - T_[N - 2];
+                Real alpha = (t - T_[N - 1]) / dT;  // >= 0
+                // theta(t) = theta_{N-1} + alpha·(theta_{N-1} - theta_{N-2})
+                //          = (1+alpha)·theta_{N-1} - alpha·theta_{N-2}
+                ij.s_lo = N - 2;
+                ij.s_hi = N - 1;
+                ij.params.theta = (1.0 + alpha) * slices_[N - 1].theta
+                                - alpha * slices_[N - 2].theta;
+                ij.params.psi   = slices_[N - 1].psi;
+                ij.params.rho   = slices_[N - 1].rho;
+                ij.c_theta_lo = -alpha;          // d/d(theta_{N-2})
+                ij.c_theta_hi = 1.0 + alpha;     // d/d(theta_{N-1})
+                ij.c_psi_lo   = 0.0; ij.c_psi_hi   = 1.0;
+                ij.c_rho_direct_lo   = 0.0; ij.c_rho_direct_hi   = 1.0;
+                ij.c_rho_via_psi_lo  = 0.0; ij.c_rho_via_psi_hi  = 0.0;
+            } else {
+                // N == 1: slope = theta_0 / T_0 (matches interpolate())
+                // theta(t) = theta_0 · (t / T_0)
+                ij.s_lo = 0; ij.s_hi = 0;
+                Real mult = t / T_[0];
+                ij.params.theta = mult * slices_[0].theta;
+                ij.params.psi   = slices_[0].psi;
+                ij.params.rho   = slices_[0].rho;
+                ij.c_theta_lo = mult; ij.c_theta_hi = 0.0;
+                ij.c_psi_lo   = 1.0;  ij.c_psi_hi   = 0.0;
+                ij.c_rho_direct_lo   = 1.0; ij.c_rho_direct_hi   = 0.0;
+                ij.c_rho_via_psi_lo  = 0.0; ij.c_rho_via_psi_hi  = 0.0;
+            }
+            return ij;
+        }
+
+        // ── Interior: T[lo] < t < T[hi] ──
+        auto it = std::upper_bound(T_.begin(), T_.end(), t);
+        Size hi = static_cast<Size>(it - T_.begin());
+        Size lo = hi - 1;
+        Real lambda = (t - T_[lo]) / (T_[hi] - T_[lo]);
+        Real oml = 1.0 - lambda;
+
+        const auto& s1 = slices_[lo];
+        const auto& s2 = slices_[hi];
+
+        ij.s_lo = lo;
+        ij.s_hi = hi;
+        ij.params.theta = oml * s1.theta + lambda * s2.theta;
+        ij.params.psi   = oml * s1.psi   + lambda * s2.psi;
+        Real psiRho = oml * s1.psi * s1.rho + lambda * s2.psi * s2.rho;
+        Real psiStar = ij.params.psi;
+        ij.params.rho = (psiStar > 1e-15) ? (psiRho / psiStar) : 0.0;
+
+        ij.c_theta_lo = oml;    ij.c_theta_hi = lambda;
+        ij.c_psi_lo   = oml;    ij.c_psi_hi   = lambda;
+
+        // rho* = [oml·psi_lo·rho_lo + lambda·psi_hi·rho_hi] / psi*
+        //
+        // d(rho*)/d(rho_lo) = oml·psi_lo / psi*                   (direct)
+        // d(rho*)/d(rho_hi) = lambda·psi_hi / psi*                (direct)
+        // d(rho*)/d(psi_lo) = oml·[rho_lo - rho*] / psi*          (via psi)
+        // d(rho*)/d(psi_hi) = lambda·[rho_hi - rho*] / psi*       (via psi)
+        if (psiStar > 1e-15) {
+            Real invPsi = 1.0 / psiStar;
+            ij.c_rho_direct_lo  = oml    * s1.psi * invPsi;
+            ij.c_rho_direct_hi  = lambda * s2.psi * invPsi;
+            ij.c_rho_via_psi_lo = oml    * (s1.rho - ij.params.rho) * invPsi;
+            ij.c_rho_via_psi_hi = lambda * (s2.rho - ij.params.rho) * invPsi;
+        } else {
+            ij.c_rho_direct_lo = ij.c_rho_direct_hi = 0.0;
+            ij.c_rho_via_psi_lo = ij.c_rho_via_psi_hi = 0.0;
+        }
+
+        return ij;
+    }
+
+    // =================================================================
+    // Global gradient at arbitrary maturity t
+    //
+    // Composes chainJacobian (pillar-level d(theta_s, psi_s)/dg) with
+    // the interpolation Jacobian d(interp)/d(pillar), plus direct rho
+    // contributions at the two pillars straddling t.
+    // =================================================================
+
+    std::vector<Real> EssviSurface::impliedVolGlobalGradient(
+            Real k, Real t,
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond) const {
+        return batchImpliedVolGlobalGradientAtTimes(
+            std::vector<Real>{t}, std::vector<Real>{k}, gp, bflyCond);
+    }
+
+    // =================================================================
+    // Batch: global gradient at multiple arbitrary (k, t) pairs
+    //
+    // chainJacobian() is computed ONCE.  For each observation, we fetch
+    // the interpolation Jacobian and combine four pillar rows (dTheta_lo,
+    // dTheta_hi, dPsi_lo, dPsi_hi) with two direct rho coefs.
+    //
+    // Complexity: O(N·P) chain + O(n_obs·P) compose.  Single SWIG call.
+    // =================================================================
+
+    std::vector<Real> EssviSurface::batchImpliedVolGlobalGradientAtTimes(
+            const std::vector<Real>& times,
+            const std::vector<Real>& ks,
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond) const {
+
+        const Size nObs = times.size();
+        QL_REQUIRE(ks.size() == nObs,
+                   "ks size (" << ks.size() << ") != times size (" << nObs << ")");
+
+        const Size N = gp.numSlices();
+        QL_REQUIRE(N == slices_.size(),
+                   "global params N=" << N << " != slices " << slices_.size());
+        const Size P = 3 * N;
+
+        // 1. Chain Jacobian — shared across all observations
+        auto chainJac = chainJacobian(gp, bflyCond);
+        const Real* dTheta = chainJac.data();           // N*P entries
+        const Real* dPsi   = chainJac.data() + N * P;   // N*P entries
+
+        std::vector<Real> J(nObs * P, 0.0);
+
+        for (Size i = 0; i < nObs; ++i) {
+            Real t = times[i];
+            Real k = ks[i];
+            QL_REQUIRE(t > 0.0, "maturity[" << i << "] must be > 0");
+
+            // 2. Interpolation at t
+            InterpJacobian ij = interpJacobian(t);
+
+            // 3. Per-slice gradient at interpolated params
+            EssviSliceGradient sg = essviImpliedVolGradient(ij.params, k, t);
+
+            // 4. Chain: coefficients on pillar rows
+            //    dsigma/dg = sg.dθ·dθ*/dg + sg.dρ·dρ*/dg + sg.dψ·dψ*/dg
+            // dρ* splits into direct pillar-rho + via-psi components;
+            // the via-psi components merge into the psi-row coefficients.
+            Real a_th_lo = sg.dSigma_dTheta * ij.c_theta_lo;
+            Real a_th_hi = sg.dSigma_dTheta * ij.c_theta_hi;
+            Real a_ps_lo = sg.dSigma_dPsi * ij.c_psi_lo
+                         + sg.dSigma_dRho * ij.c_rho_via_psi_lo;
+            Real a_ps_hi = sg.dSigma_dPsi * ij.c_psi_hi
+                         + sg.dSigma_dRho * ij.c_rho_via_psi_hi;
+
+            const Size s_lo = ij.s_lo, s_hi = ij.s_hi;
+            Real* row = &J[i * P];
+            const Real* dTh_lo = &dTheta[s_lo * P];
+            const Real* dTh_hi = &dTheta[s_hi * P];
+            const Real* dPs_lo = &dPsi  [s_lo * P];
+            const Real* dPs_hi = &dPsi  [s_hi * P];
+
+            for (Size gi = 0; gi < P; ++gi) {
+                row[gi] = a_th_lo * dTh_lo[gi]
+                        + a_th_hi * dTh_hi[gi]
+                        + a_ps_lo * dPs_lo[gi]
+                        + a_ps_hi * dPs_hi[gi];
+            }
+            // Direct rho contribution (rho offset = 0 in global param layout)
+            row[s_lo] += sg.dSigma_dRho * ij.c_rho_direct_lo;
+            row[s_hi] += sg.dSigma_dRho * ij.c_rho_direct_hi;
+        }
+
+        return J;
+    }
+
+    // =================================================================
     // Constructors
     // =================================================================
 

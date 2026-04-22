@@ -293,6 +293,35 @@ namespace QuantLib {
             EssviButterflyCondition::Type bflyCond
                 = EssviButterflyCondition::GatheralJacquier) const;
 
+        /*! Gradient of implied vol w.r.t. global params at arbitrary
+            maturity t (interpolated between pillar slices; extrapolated
+            outside).  Composes the pillar chainJacobian() with the
+            interpolation Jacobian d(theta*,rho*,psi*)/d(theta_s,rho_s,psi_s)
+            so observations evaluate at their actual maturity — no
+            bucketing to a nearest-pillar slice.
+
+            Returns a vector of length 3N in the same global-param layout
+            as the slice-idx overload.
+        */
+        std::vector<Real> impliedVolGlobalGradient(
+            Real logMoneyness, Real maturity,
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond
+                = EssviButterflyCondition::GatheralJacquier) const;
+
+        /*! Batch variant of impliedVolGlobalGradient(k, t, gp, ...).
+            Shares one chainJacobian() evaluation across all observations
+            — ~O(N·P + n_obs·P) instead of O(n_obs·N·P).  Intended as
+            the inner hot-loop primitive for calibrators.
+            Returns flat row-major: n_obs rows × 3N cols.
+        */
+        std::vector<Real> batchImpliedVolGlobalGradientAtTimes(
+            const std::vector<Real>& times,
+            const std::vector<Real>& logMoneynesses,
+            const EssviGlobalParams& gp,
+            EssviButterflyCondition::Type bflyCond
+                = EssviButterflyCondition::GatheralJacquier) const;
+
         /*! Chain Jacobian: d(theta_s, rho_s, psi_s) / d(global_param_j)
             for all slices.  Computed once, then reused for all observations.
             Returns flat row-major: N rows × nParams cols, where each row
@@ -319,6 +348,35 @@ namespace QuantLib {
 
     private:
         EssviSliceParams interpolate(Real t) const;
+
+        /*! Interpolation Jacobian at time t.  Returns interpolated
+            slice params plus the coefficients needed to chain
+            d(interp_params)/d(pillar_params).
+
+            Interior (T[lo] <= t <= T[hi]): linear in theta,psi; psi-
+            weighted in rho (matches interpolate()).
+            Left extrap (t < T[0]): theta,psi shrink linearly to 0 at
+            t=0; rho flat.
+            Right extrap (t > T[N-1]): theta slopes linearly from the
+            last interval; rho,psi flat.
+
+            Layout of coefs: interp params p* (p in {theta,psi}) satisfy
+                p*  = c_{p,lo}·p_lo + c_{p,hi}·p_hi       (+ const for rho)
+            so d(p*)/d(global) = c_{p,lo}·d(p_lo)/d(global) + ...
+
+            rho* depends on (rho_lo, rho_hi, psi_lo, psi_hi) — direct rho
+            coefs plus "via psi" coefs (rho via psi-weighting).
+        */
+        struct InterpJacobian {
+            EssviSliceParams params;        //!< interpolated (theta*, rho*, psi*)
+            Size s_lo, s_hi;                //!< pillar indices
+            Real c_theta_lo, c_theta_hi;    //!< d(theta*)/d(theta_{lo,hi})
+            Real c_psi_lo,   c_psi_hi;      //!< d(psi*)/d(psi_{lo,hi})
+            Real c_rho_direct_lo, c_rho_direct_hi; //!< d(rho*)/d(rho_{lo,hi})
+            Real c_rho_via_psi_lo, c_rho_via_psi_hi; //!< d(rho*)/d(psi_{lo,hi})
+        };
+
+        InterpJacobian interpJacobian(Real t) const;
 
         std::vector<Real>            T_;
         std::vector<EssviSliceParams> slices_;
