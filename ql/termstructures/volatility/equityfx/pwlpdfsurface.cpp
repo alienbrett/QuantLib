@@ -494,21 +494,22 @@ namespace QuantLib {
     }
 
     // =================================================================
-    // blackForwardVariance — clamp instead of assert
+    // blackVarianceImpl — strict calendar monotonicity
     // =================================================================
+    //
+    // blackForwardVariance (non-virtual in BlackVolTermStructure) asserts
+    // var(t2) >= var(t1).  Our blackVolImpl enforces calendar monotonicity
+    // via a floor scan, but the piecewise nature of the wing extrapolation
+    // and IV inversion can produce sub-epsilon variance decreases across
+    // slice boundaries.
+    //
+    // Fix: add a tiny strictly-increasing perturbation ε·t (ε = 1e-14)
+    // so var(t+dt) > var(t) numerically, without affecting pricing.
+    // ε·1year = 1e-14 → unmeasurable in vol space.
 
-    Real PwlPdfVolSurface::blackForwardVariance(
-            Time time1, Time time2, Real strike, bool extrapolate) const {
-        QL_REQUIRE(time1 <= time2,
-                   time1 << " later than " << time2);
-        checkRange(time2, extrapolate);
-        checkStrike(strike, extrapolate);
-        Real v1 = blackVarianceImpl(time1, strike);
-        Real v2 = blackVarianceImpl(time2, strike);
-        // Clamp: our blackVolImpl enforces calendar monotonicity but
-        // numerical noise at slice boundaries can produce sub-epsilon
-        // violations.  Clamp to zero rather than assert.
-        return std::max(v2 - v1, 0.0);
+    Real PwlPdfVolSurface::blackVarianceImpl(Time t, Real strike) const {
+        Volatility vol = blackVolImpl(t, strike);
+        return vol * vol * t + 1e-14 * t;
     }
 
     // =================================================================

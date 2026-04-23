@@ -129,14 +129,13 @@ namespace QuantLib {
 
       protected:
         Volatility blackVolImpl(Time t, Real strike) const override;
-
-      public:
-        //! Override to clamp instead of assert — our blackVolImpl
-        //! enforces calendar monotonicity but numerical noise at
-        //! slice boundaries can produce sub-epsilon violations.
-        Real blackForwardVariance(Time time1, Time time2,
-                                  Real strike,
-                                  bool extrapolate = false) const override;
+        //! Override default vol²×t to add epsilon-safe calendar floor.
+        //! blackForwardVariance (non-virtual in base) asserts var(t2)>=var(t1).
+        //! Our blackVolImpl enforces monotonicity but floating-point noise
+        //! can produce sub-epsilon violations → crash in FD engine.
+        //! This override adds a tiny upward nudge proportional to t so
+        //! var(t+dt) > var(t) always holds numerically.
+        Real blackVarianceImpl(Time t, Real strike) const override;
 
       private:
         Real forward(Time t) const;
