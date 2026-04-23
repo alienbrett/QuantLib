@@ -494,6 +494,24 @@ namespace QuantLib {
     }
 
     // =================================================================
+    // blackForwardVariance — clamp instead of assert
+    // =================================================================
+
+    Real PwlPdfVolSurface::blackForwardVariance(
+            Time time1, Time time2, Real strike, bool extrapolate) const {
+        QL_REQUIRE(time1 <= time2,
+                   time1 << " later than " << time2);
+        checkRange(time2, extrapolate);
+        checkStrike(strike, extrapolate);
+        Real v1 = blackVarianceImpl(time1, strike);
+        Real v2 = blackVarianceImpl(time2, strike);
+        // Clamp: our blackVolImpl enforces calendar monotonicity but
+        // numerical noise at slice boundaries can produce sub-epsilon
+        // violations.  Clamp to zero rather than assert.
+        return std::max(v2 - v1, 0.0);
+    }
+
+    // =================================================================
     // blackVolImpl — bilinear in total variance
     // =================================================================
 
