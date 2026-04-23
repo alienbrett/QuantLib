@@ -91,7 +91,7 @@ namespace QuantLib {
 
         const Real volFloor = 0.005;
         const Real volCap = 5.0;
-        const Real pdfFloor = 1e-12;
+        const Real pdfFloor = 1e-8;
 
         // Forward and moneyness
         DiscountFactor dr = riskFreeRate_->discount(t, true);
@@ -197,12 +197,12 @@ namespace QuantLib {
 
         Real localVol = std::sqrt(localVar);
 
-        // Relative cap: local vol ≤ 3× black vol at same (t, K).
+        // Relative cap: local vol ≤ 2× black vol at same (t, K).
         // Prevents transition-zone spikes where PDF is tiny but
-        // above pdfFloor.  blackVol uses flat wing extrapolation
-        // at boundary vols, so the cap is always finite and smooth.
+        // above pdfFloor.  blackVol uses linear total-variance wing
+        // extrapolation, so the cap is always finite and smooth.
         Real bvol = std::max(pdfSurface_->blackVol(t, K, true), volFloor);
-        Real relCap = std::min(3.0 * bvol, volCap);
+        Real relCap = std::min(2.0 * bvol, volCap);
         return std::min(std::max(localVol, volFloor), relCap);
     }
 

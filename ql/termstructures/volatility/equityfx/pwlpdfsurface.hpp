@@ -59,10 +59,16 @@ namespace QuantLib {
             std::vector<Real> x;    // moneyness grid x = K/F (sorted)
             std::vector<Real> q;    // moneyness-space PDF q_x values
             std::vector<Real> h;    // x[i+1] - x[i] (spacings)
-            // Wing flat-vol extrapolation: boundary vols computed from
-            // the innermost grid points where IV inversion succeeds.
+            // Wing extrapolation: linear total variance w(k) = σ²T.
+            // Boundary vol + slope computed from the outermost grid
+            // points where IV inversion succeeds.  Linear w(k) gives
+            // C¹-smooth vol surface → well-defined Dupire everywhere.
             Real leftWingVol = 0.20;
             Real rightWingVol = 0.20;
+            Real leftBoundaryK = -1.0;    // log-moneyness at left boundary
+            Real rightBoundaryK = 1.0;    // log-moneyness at right boundary
+            Real leftWingSlope = 0.0;     // dw/dk at left boundary (≤0)
+            Real rightWingSlope = 0.0;    // dw/dk at right boundary (≥0)
         };
 
         //! Continuous dividend yield only

@@ -103,11 +103,13 @@ namespace QuantLib {
         }
     }
 
-    // For each slice, compute boundary vols for wing extrapolation.
-    // Walks inward from each grid edge to find the outermost point
-    // where Black IV inversion succeeds.  Strikes beyond this get
-    // flat vol = boundary vol.  This keeps local vol finite and
-    // well-defined (flat black vol → local vol = black vol).
+    // For each slice, compute boundary vols and wing slopes for
+    // linear total-variance extrapolation.  Walks inward from each
+    // grid edge to find the two outermost points where Black IV
+    // inversion succeeds.  Beyond the boundary:
+    //   w(k) = w_boundary + slope × (k - k_boundary)
+    // where w = σ²T.  This is C¹ at the boundary → Dupire is
+    // well-defined → no FD engine crash.
     static void computeWingVols(
             std::vector<PwlPdfVolSurface::PdfSlice>& slices) {
         for (auto& sl : slices) {
@@ -115,30 +117,120 @@ namespace QuantLib {
             if (m < 4) {
                 sl.leftWingVol = 0.20;
                 sl.rightWingVol = 0.20;
+                sl.leftBoundaryK = std::log(sl.x[0]);
+                sl.rightBoundaryK = std::log(sl.x[m - 1]);
+                sl.leftWingSlope = 0.0;
+                sl.rightWingSlope = 0.0;
                 continue;
             }
 
-            // ATM vol as ultimate fallback
             Real atmVol = sliceVol(sl, 1.0);
             if (atmVol < 0.0) atmVol = 0.20;
 
-            // Right wing: walk inward from right edge
+            // Right wing: find two outermost valid vols for slope
             sl.rightWingVol = atmVol;
-            for (Size i = m - 1; i > 0; --i) {
-                Real vol = sliceVol(sl, sl.x[i]);
-                if (vol > 0.0) {
-                    sl.rightWingVol = vol;
-                    break;
+            sl.rightBoundaryK = 0.0;
+            sl.rightWingSlope = 0.0;
+            {
+                Real k1 = 0.0, w1 = 0.0;
+                bool found1 = false;
+                for (Size i = m - 1; i > 0; --i) {
+                    Real vol = sliceVol(sl, sl.x[i]);
+                    if (vol > 0.0) {
+                        Real k = std::log(sl.x[i]);
+                        Real w = vol * vol * sl.T;
+                        if (!found1) {
+                            sl.rightWingVol = vol;
+                            sl.rightBoundaryK = k;
+                            k1 = k; w1 = w;
+                            found1 = true;
+                        } else {
+                            // Second point → compute slope
+                            if (std::abs(k1 - k) > 1e-10)
+                                sl.rightWingSlope = std::max(
+                                    (w1 - w) / (k1 - k), 0.0);
+                            break;
+                        }
+                    }
                 }
             }
 
-            // Left wing: walk inward from left edge
+            // Left wing: find two outermost valid vols for slope
             sl.leftWingVol = atmVol;
-            for (Size i = 0; i < m; ++i) {
-                Real vol = sliceVol(sl, sl.x[i]);
-                if (vol > 0.0) {
-                    sl.leftWingVol = vol;
-                    break;
+            sl.leftBoundaryK = 0.0;
+            sl.leftWingSlope = 0.0;
+            {
+                Real k1 = 0.0, w1 = 0.0;
+                bool found1 = false;
+                for (Size i = 0; i < m; ++i) {
+                    Real vol = sliceVol(sl, sl.x[i]);
+                    if (vol > 0.0) {
+                        Real k = std::log(sl.x[i]);
+                        Real w = vol * vol * sl.T;
+                        if (!found1) {
+                            sl.leftWingVol = vol;
+                            sl.leftBoundaryK = k;
+                            k1 = k; w1 = w;
+                            found1 = true;
+                        } else {
+                            // Second point → compute slope
+                            if (std::abs(k - k1) > 1e-10)
+                                sl.leftWingSlope = std::min(
+                                    (w - w1) / (k - k1), 0.0);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: enforce calendar monotonicity across slices.
+        // At any fixed k in the wing, w(k, T) must be non-decreasing
+        // in T.  Short-dated slices have narrower grids → steeper
+        // extrapolated slopes.  Clamp each slice's wing w so it
+        // never exceeds the next slice's w at the same k.
+        //
+        // Strategy: for each slice i (ascending T), compute w at the
+        // previous slice's boundary k.  If w_i < w_{i-1}, flatten
+        // the slope so w_i >= w_{i-1} everywhere beyond the boundary.
+        if (slices.size() >= 2) {
+            for (Size i = 1; i < slices.size(); ++i) {
+                auto& prev = slices[i - 1];
+                auto& curr = slices[i];
+
+                // Left wing: check at prev's boundary k (most extreme)
+                Real kL = prev.leftBoundaryK;
+                Real w_prev_L = prev.leftWingVol * prev.leftWingVol * prev.T;
+                // w at kL on prev = w_prev_L (it's the boundary)
+                // w at kL on curr = curr boundary + curr slope * (kL - curr boundary)
+                Real w_curr_L = curr.leftWingVol * curr.leftWingVol * curr.T
+                    + curr.leftWingSlope * (kL - curr.leftBoundaryK);
+                if (w_curr_L < w_prev_L) {
+                    // Flatten curr's left slope so it matches prev at kL
+                    Real w_curr_bdy = curr.leftWingVol * curr.leftWingVol * curr.T;
+                    if (std::abs(kL - curr.leftBoundaryK) > 1e-10) {
+                        curr.leftWingSlope = std::min(
+                            (w_prev_L - w_curr_bdy) / (kL - curr.leftBoundaryK),
+                            0.0);
+                    } else {
+                        curr.leftWingSlope = 0.0;
+                    }
+                }
+
+                // Right wing: check at prev's boundary k
+                Real kR = prev.rightBoundaryK;
+                Real w_prev_R = prev.rightWingVol * prev.rightWingVol * prev.T;
+                Real w_curr_R = curr.rightWingVol * curr.rightWingVol * curr.T
+                    + curr.rightWingSlope * (kR - curr.rightBoundaryK);
+                if (w_curr_R < w_prev_R) {
+                    Real w_curr_bdy = curr.rightWingVol * curr.rightWingVol * curr.T;
+                    if (std::abs(kR - curr.rightBoundaryK) > 1e-10) {
+                        curr.rightWingSlope = std::max(
+                            (w_prev_R - w_curr_bdy) / (kR - curr.rightBoundaryK),
+                            0.0);
+                    } else {
+                        curr.rightWingSlope = 0.0;
+                    }
                 }
             }
         }
@@ -405,6 +497,19 @@ namespace QuantLib {
     // blackVolImpl — bilinear in total variance
     // =================================================================
 
+    // Linear total variance wing extrapolation.
+    // w(k) = w_boundary + slope × (k - k_boundary), then σ = √(w/T).
+    // C¹ continuous → Dupire well-defined → no FD crash.
+    static Volatility wingVol(
+            const PwlPdfVolSurface::PdfSlice& sl,
+            Real k, bool isRight) {
+        Real bvol = isRight ? sl.rightWingVol : sl.leftWingVol;
+        Real bk   = isRight ? sl.rightBoundaryK : sl.leftBoundaryK;
+        Real slope = isRight ? sl.rightWingSlope : sl.leftWingSlope;
+        Real w = bvol * bvol * sl.T + slope * (k - bk);
+        return std::sqrt(std::max(w, 1e-8) / sl.T);
+    }
+
     // Invert call forward price at a single slice to Black vol.
     static Volatility volAtSlice(
             const PwlPdfVolSurface& self,
@@ -414,16 +519,15 @@ namespace QuantLib {
         Real F = (sl.calForward > 0.0) ? sl.calForward : 0.0;
         if (F <= 0.0) return 0.20;
         Real x = strike / F;
+        Real k = std::log(x);
         Real callPrice = F * self.callForward(x, sl.T);
 
-        // Wing extrapolation: use precomputed boundary vols
-        // instead of hardcoded constants.  Flat vol in wings →
-        // finite local vol (σ_loc = σ_BS for constant BS vol).
+        // Wing extrapolation: linear total variance beyond boundary.
         Real intrinsic = std::max(F - strike, 0.0);
         if (callPrice <= intrinsic + 1e-12 * F)
-            return sl.rightWingVol;   // deep OTM call / right wing
+            return wingVol(sl, k, true);    // right wing
         if (callPrice >= F * 0.9999)
-            return sl.leftWingVol;    // deep ITM call / left wing
+            return wingVol(sl, k, false);   // left wing
 
         // OTM-side inversion for stability
         Option::Type optType;
@@ -434,7 +538,7 @@ namespace QuantLib {
         } else {
             optType = Option::Put;
             price = callPrice - (F - strike);
-            if (price <= 0.0) return sl.leftWingVol;
+            if (price <= 0.0) return wingVol(sl, k, false);
         }
 
         try {
@@ -442,7 +546,7 @@ namespace QuantLib {
                 optType, strike, F, price);
             return stddev / std::sqrt(sl.T);
         } catch (...) {
-            return (x >= 1.0) ? sl.rightWingVol : sl.leftWingVol;
+            return wingVol(sl, k, x >= 1.0);
         }
     }
 
@@ -451,27 +555,43 @@ namespace QuantLib {
         Size N = slices_.size();
 
         if (N == 1 || t <= slices_.front().T) {
-            // Before/at first slice: flat vol extrapolation
             return volAtSlice(*this, 0, strike);
         }
         if (t >= slices_.back().T) {
-            // After last slice: flat vol extrapolation
-            return volAtSlice(*this, N - 1, strike);
+            // After last slice: ensure w(t) >= w(last slice)
+            Real vol_last = volAtSlice(*this, N - 1, strike);
+            Real w_last = vol_last * vol_last * slices_[N - 1].T;
+            // Check all earlier slices for calendar monotonicity
+            for (Size i = 0; i < N - 1; ++i) {
+                Real vi = volAtSlice(*this, i, strike);
+                Real wi = vi * vi * slices_[i].T;
+                if (wi > w_last) w_last = wi;
+            }
+            return std::sqrt(std::max(w_last, 0.0) / t);
         }
 
-        // Between slices: bilinear in total variance
+        // Between slices: bilinear in total variance with calendar floor.
+        // Scan ALL slices up to and including hi to find the maximum
+        // total variance at this strike.  w(t) must never decrease.
         Size hi = 0;
         for (Size i = 1; i < N; ++i)
             if (slices_[i].T >= t) { hi = i; break; }
         Size lo = hi - 1;
+
+        // Compute w at all slices up to hi, enforce monotonicity
+        Real w_lo = 0.0, w_hi = 0.0;
+        Real w_floor = 0.0;
+        for (Size i = 0; i <= hi; ++i) {
+            Real vi = volAtSlice(*this, i, strike);
+            Real wi = vi * vi * slices_[i].T;
+            if (wi < w_floor) wi = w_floor;
+            w_floor = wi;
+            if (i == lo) w_lo = wi;
+            if (i == hi) w_hi = wi;
+        }
+
         Real alpha = (t - slices_[lo].T) /
                      (slices_[hi].T - slices_[lo].T);
-
-        Real vol_lo = volAtSlice(*this, lo, strike);
-        Real vol_hi = volAtSlice(*this, hi, strike);
-
-        Real w_lo = vol_lo * vol_lo * slices_[lo].T;
-        Real w_hi = vol_hi * vol_hi * slices_[hi].T;
         Real w = (1.0 - alpha) * w_lo + alpha * w_hi;
 
         return std::sqrt(std::max(w, 0.0) / t);
