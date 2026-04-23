@@ -28,6 +28,11 @@
     coupon values are computed by evaluating the conditional probability
     that the observation index falls within [lower, upper] at each
     observation date, given the state variable at the exercise date.
+
+    Exploits the monotonicity of swapRate(t, y) in y to replace
+    inner quadrature with pre-computed root finding + CDF evaluation.
+    Observation roots y_L, y_U are computed once per obs date, then
+    conditional probabilities for each grid point are O(1) CDF lookups.
 */
 
 #ifndef quantlib_gaussian1d_callable_range_accrual_engine_hpp
@@ -69,27 +74,46 @@ namespace QuantLib {
         void calculate() const override;
 
       private:
-        //! Compute the NPV of remaining swap cash flows given state y
-        //! at the exercise date.
-        Real underlyingNpv(const Date& expiry, Real y) const;
 
-        //! Compute the expected range accrual fraction for RA coupon i,
-        //! conditional on state y at referenceDate.
-        //! Uses inner quadrature over the conditional distribution at
-        //! each observation date.
-        Real expectedAccrualFraction(Size couponIndex,
-                                     const Date& referenceDate,
-                                     Real y) const;
+        //! Pre-computed root info for one observation date.
+        //! y_L and y_U are in standardized state space (y-coordinate).
+        //! alwaysIn/alwaysOut flags bypass root finding when the entire
+        //! reachable rate range is inside or outside the trigger band.
+        struct ObsRoot {
+            Time obsTime = 0.0;
+            Real y_L = 0.0;    //!< swapRate(obsDate, y_L) = lower
+            Real y_U = 0.0;    //!< swapRate(obsDate, y_U) = upper
+            bool alwaysIn = false;   //!< rate always in [lower, upper]
+            bool alwaysOut = false;  //!< rate always outside
+            bool fixedObs = false;   //!< obs in the past, deterministic
+            Real fixedRate = 0.0;    //!< rate at fixing (if fixedObs)
+        };
+
+        //! Pre-compute roots for all observation dates in a coupon period.
+        std::vector<ObsRoot> precomputeRoots(
+            Size couponIndex,
+            const Date& settlement) const;
 
         //! Compute P(lower <= swapRate <= upper | y at referenceDate)
-        //! at a single observation date, via inner Gauss-Hermite
-        //! quadrature over the conditional state distribution.
-        Real rangeProbability(const Date& observationDate,
-                              const Period& tenor,
-                              Rate lower,
-                              Rate upper,
-                              const Date& referenceDate,
-                              Real y) const;
+        //! using pre-computed roots (CDF-only, no swap rate evaluation).
+        Real rangeProbabilityFromRoot(
+            const ObsRoot& root,
+            Time refTime,
+            Real y) const;
+
+        //! Compute the expected range accrual fraction for RA coupon i,
+        //! conditional on state y at referenceDate, using pre-computed roots.
+        Real expectedAccrualFraction(
+            const std::vector<ObsRoot>& roots,
+            Time refTime,
+            Real y) const;
+
+        //! Compute the NPV of remaining swap cash flows given state y
+        //! at the exercise date.
+        Real underlyingNpv(
+            const Date& expiry,
+            Real y,
+            const std::vector<std::vector<ObsRoot>>& allRoots) const;
 
         const int integrationPoints_;
         const Real stddevs_;

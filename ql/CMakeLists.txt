@@ -256,6 +256,7 @@ set(QL_SOURCES
     instruments/bonds/fixedratebond.cpp
     instruments/bonds/floatingratebond.cpp
     instruments/bonds/zerocouponbond.cpp
+    instruments/callablerangeaccrualswap.cpp
     instruments/capfloor.cpp
     instruments/claim.cpp
     instruments/cliquetoption.cpp
@@ -300,6 +301,7 @@ set(QL_SOURCES
     instruments/quantobarrieroption.cpp
     instruments/quantoforwardvanillaoption.cpp
     instruments/quantovanillaoption.cpp
+    instruments/rangeaccrualswap.cpp
     instruments/simplechooseroption.cpp
     instruments/simplifynotificationgraph.cpp
     instruments/softbarrieroption.cpp
@@ -728,6 +730,7 @@ set(QL_SOURCES
     pricingengines/swap/cvaswapengine.cpp
     pricingengines/swap/discountingswapengine.cpp
     pricingengines/swap/discretizedswap.cpp
+    pricingengines/swap/gaussian1dcallablerangeaccrualengine.cpp
     pricingengines/swap/treeswapengine.cpp
     pricingengines/swaption/basketgeneratingengine.cpp
     pricingengines/swaption/blackswaptionengine.cpp
@@ -1347,6 +1350,7 @@ set(QL_HEADERS
     instruments/bonds/floatingratebond.hpp
     instruments/bonds/zerocouponbond.hpp
     instruments/callabilityschedule.hpp
+    instruments/callablerangeaccrualswap.hpp
     instruments/capfloor.hpp
     instruments/claim.hpp
     instruments/cliquetoption.hpp
@@ -1392,6 +1396,7 @@ set(QL_HEADERS
     instruments/quantobarrieroption.hpp
     instruments/quantoforwardvanillaoption.hpp
     instruments/quantovanillaoption.hpp
+    instruments/rangeaccrualswap.hpp
     instruments/simplechooseroption.hpp
     instruments/simplifynotificationgraph.hpp
     instruments/softbarrieroption.hpp
@@ -1980,6 +1985,7 @@ set(QL_HEADERS
     pricingengines/swap/cvaswapengine.hpp
     pricingengines/swap/discountingswapengine.hpp
     pricingengines/swap/discretizedswap.hpp
+    pricingengines/swap/gaussian1dcallablerangeaccrualengine.hpp
     pricingengines/swap/treeswapengine.hpp
     pricingengines/swaption/basketgeneratingengine.hpp
     pricingengines/swaption/blackswaptionengine.hpp

@@ -26,6 +26,125 @@
 namespace QuantLib {
 
     // =================================================================
+    // Static helpers for wing vol computation
+    // =================================================================
+
+    // Compute call forward CF/F from a PdfSlice at moneyness xEval.
+    // Same polynomial integration as the member function, but takes
+    // PdfSlice directly so it can be called before construction.
+    static Real callForwardOnSlice(
+            const PwlPdfVolSurface::PdfSlice& sl, Real xEval) {
+        Size m = sl.x.size();
+        if (xEval >= sl.x[m - 1]) return 0.0;
+        if (xEval <= sl.x[0]) xEval = sl.x[0];
+
+        auto it = std::upper_bound(sl.x.begin(), sl.x.end(), xEval);
+        Size seg = (it == sl.x.begin()) ? 0
+                 : static_cast<Size>(it - sl.x.begin()) - 1;
+        if (seg >= m - 1) seg = m - 2;
+
+        bool onGrid = (std::abs(xEval - sl.x[seg]) < 1e-14);
+        Real result = 0.0;
+
+        if (!onGrid) {
+            Real hi = sl.h[seg];
+            Real r = sl.x[seg + 1] - xEval;
+            Real tOff = xEval - sl.x[seg];
+            result += sl.q[seg] * (r * r * r / (6.0 * hi));
+            result += sl.q[seg + 1] * (r * r * (2.0 * r + 3.0 * tOff)
+                                        / (6.0 * hi));
+        }
+
+        Size startSeg = onGrid ? seg : seg + 1;
+        for (Size l = startSeg; l < m - 1; ++l) {
+            Real hi = sl.h[l];
+            Real d = sl.x[l] - xEval;
+            result += sl.q[l] * (hi * hi / 6.0 + d * hi / 2.0);
+            result += sl.q[l + 1] * (hi * hi / 3.0 + d * hi / 2.0);
+        }
+
+        return std::max(result, 0.0);
+    }
+
+    // Compute Black vol at a grid point on a single slice.
+    // Returns negative if IV inversion fails (no valid vol).
+    static Volatility sliceVol(
+            const PwlPdfVolSurface::PdfSlice& sl, Real xEval) {
+        Real F = sl.calForward;
+        if (F <= 0.0) return -1.0;
+
+        Real K = F * xEval;
+        Real callFwd = callForwardOnSlice(sl, xEval);
+        Real callPrice = F * callFwd;
+
+        Real intrinsic = std::max(F - K, 0.0);
+        if (callPrice <= intrinsic + 1e-12 * F) return -1.0;
+        if (callPrice >= F * 0.9999) return -1.0;
+
+        Option::Type optType;
+        Real price;
+        if (K >= F) {
+            optType = Option::Call;
+            price = callPrice;
+        } else {
+            optType = Option::Put;
+            price = callPrice - (F - K);
+            if (price <= 0.0) return -1.0;
+        }
+
+        try {
+            Real stddev = blackFormulaImpliedStdDevLiRS(
+                optType, K, F, price);
+            Real vol = stddev / std::sqrt(sl.T);
+            if (vol > 0.005 && vol < 5.0) return vol;
+            return -1.0;
+        } catch (...) {
+            return -1.0;
+        }
+    }
+
+    // For each slice, compute boundary vols for wing extrapolation.
+    // Walks inward from each grid edge to find the outermost point
+    // where Black IV inversion succeeds.  Strikes beyond this get
+    // flat vol = boundary vol.  This keeps local vol finite and
+    // well-defined (flat black vol → local vol = black vol).
+    static void computeWingVols(
+            std::vector<PwlPdfVolSurface::PdfSlice>& slices) {
+        for (auto& sl : slices) {
+            Size m = sl.x.size();
+            if (m < 4) {
+                sl.leftWingVol = 0.20;
+                sl.rightWingVol = 0.20;
+                continue;
+            }
+
+            // ATM vol as ultimate fallback
+            Real atmVol = sliceVol(sl, 1.0);
+            if (atmVol < 0.0) atmVol = 0.20;
+
+            // Right wing: walk inward from right edge
+            sl.rightWingVol = atmVol;
+            for (Size i = m - 1; i > 0; --i) {
+                Real vol = sliceVol(sl, sl.x[i]);
+                if (vol > 0.0) {
+                    sl.rightWingVol = vol;
+                    break;
+                }
+            }
+
+            // Left wing: walk inward from left edge
+            sl.leftWingVol = atmVol;
+            for (Size i = 0; i < m; ++i) {
+                Real vol = sliceVol(sl, sl.x[i]);
+                if (vol > 0.0) {
+                    sl.leftWingVol = vol;
+                    break;
+                }
+            }
+        }
+    }
+
+    // =================================================================
     // Init: validate, build slices, sort, precompute moneyness grid
     // =================================================================
 
@@ -107,6 +226,7 @@ namespace QuantLib {
         registerWith(dividendYield_);
         initPdfSlices(slices_, referenceDate, dates, xGrids, qValues,
                       calibrationForwards, dc);
+        computeWingVols(slices_);
     }
 
     PwlPdfVolSurface::PwlPdfVolSurface(
@@ -134,6 +254,7 @@ namespace QuantLib {
         registerWith(dividendYield_);
         initPdfSlices(slices_, referenceDate, dates, xGrids, qValues,
                       calibrationForwards, dc);
+        computeWingVols(slices_);
     }
 
     // =================================================================
@@ -173,57 +294,11 @@ namespace QuantLib {
     }
 
     // =================================================================
-    // callForwardSlice: moneyness-space polynomial integration
-    //
-    // CF/F at moneyness xEval:
-    //   c(xEval) = integral from xEval to x_max of (u - xEval) q(u) du
-    //
-    // For full segment [x_l, x_{l+1}] with linear q, h = x_{l+1} - x_l:
-    //   coeff of q_l:     h^2/6 + (x_l - xEval) * h/2
-    //   coeff of q_{l+1}: h^2/3 + (x_l - xEval) * h/2
-    //
-    // For partial segment [xEval, x_{l+1}]:
-    //   r = x_{l+1} - xEval, t_off = xEval - x_l
-    //   coeff of q_l:     r^3 / (6*h)
-    //   coeff of q_{l+1}: r^2 * (2*r + 3*t_off) / (6*h)
+    // callForwardSlice: delegates to static callForwardOnSlice
     // =================================================================
 
     Real PwlPdfVolSurface::callForwardSlice(Size idx, Real xEval) const {
-        const PdfSlice& sl = slices_[idx];
-        Size m = sl.x.size();
-
-        if (xEval >= sl.x[m - 1]) return 0.0;
-        if (xEval <= sl.x[0]) xEval = sl.x[0];
-
-        // Find segment: x[seg] <= xEval < x[seg+1]
-        auto it = std::upper_bound(sl.x.begin(), sl.x.end(), xEval);
-        Size seg = (it == sl.x.begin()) ? 0
-                 : static_cast<Size>(it - sl.x.begin()) - 1;
-        if (seg >= m - 1) seg = m - 2;
-
-        bool onGrid = (std::abs(xEval - sl.x[seg]) < 1e-14);
-        Real result = 0.0;
-
-        // Partial first segment [xEval, x[seg+1]]
-        if (!onGrid) {
-            Real hi = sl.h[seg];
-            Real r = sl.x[seg + 1] - xEval;
-            Real tOff = xEval - sl.x[seg];
-            result += sl.q[seg] * (r * r * r / (6.0 * hi));
-            result += sl.q[seg + 1] * (r * r * (2.0 * r + 3.0 * tOff)
-                                        / (6.0 * hi));
-        }
-
-        // Full segments
-        Size startSeg = onGrid ? seg : seg + 1;
-        for (Size l = startSeg; l < m - 1; ++l) {
-            Real hi = sl.h[l];
-            Real d = sl.x[l] - xEval;  // >= 0
-            result += sl.q[l] * (hi * hi / 6.0 + d * hi / 2.0);
-            result += sl.q[l + 1] * (hi * hi / 3.0 + d * hi / 2.0);
-        }
-
-        return std::max(result, 0.0);
+        return callForwardOnSlice(slices_[idx], xEval);
     }
 
     // =================================================================
@@ -327,71 +402,28 @@ namespace QuantLib {
     }
 
     // =================================================================
-    // blackVolImpl
+    // blackVolImpl — bilinear in total variance
     // =================================================================
 
-    Volatility PwlPdfVolSurface::blackVolImpl(Time t, Real strike) const {
-        if (t < 1e-14) t = 1e-14;
-        Size N = slices_.size();
-        Real F, callPrice;
+    // Invert call forward price at a single slice to Black vol.
+    static Volatility volAtSlice(
+            const PwlPdfVolSurface& self,
+            Size idx,
+            Real strike) {
+        const auto& sl = self.pdfSlices()[idx];
+        Real F = (sl.calForward > 0.0) ? sl.calForward : 0.0;
+        if (F <= 0.0) return 0.20;
+        Real x = strike / F;
+        Real callPrice = F * self.callForward(x, sl.T);
 
-        if (N == 1 || t <= slices_.front().T) {
-            F = forwardAtSlice(0);
-            Real x = strike / F;
-            Real c = callForwardSlice(0, x) * t / slices_[0].T;
-            callPrice = F * c;
-        } else if (t >= slices_.back().T) {
-            F = forwardAtSlice(N - 1);
-            Real x = strike / F;
-            Real c = callForwardSlice(N - 1, x) * t / slices_[N - 1].T;
-            callPrice = F * c;
-        } else {
-            Size hi = 0;
-            for (Size i = 1; i < N; ++i)
-                if (slices_[i].T >= t) { hi = i; break; }
-            Size lo = hi - 1;
-            Real alpha = (t - slices_[lo].T) /
-                         (slices_[hi].T - slices_[lo].T);
-
-            Real F_lo = forwardAtSlice(lo);
-            Real F_hi = forwardAtSlice(hi);
-            Real x_lo = strike / F_lo;
-            Real x_hi = strike / F_hi;
-
-            Real C_lo = F_lo * callForwardSlice(lo, x_lo);
-            Real C_hi = F_hi * callForwardSlice(hi, x_hi);
-
-            callPrice = (1.0 - alpha) * C_lo + alpha * C_hi;
-            F = (1.0 - alpha) * F_lo + alpha * F_hi;
-        }
-
-        // Edge: deep OTM
+        // Wing extrapolation: use precomputed boundary vols
+        // instead of hardcoded constants.  Flat vol in wings →
+        // finite local vol (σ_loc = σ_BS for constant BS vol).
         Real intrinsic = std::max(F - strike, 0.0);
-        if (callPrice <= intrinsic + 1e-12 * F) {
-            try {
-                Real cATM = callForwardSlice(0, 1.0);  // x=1 is ATM
-                Real F0 = forwardAtSlice(0);
-                if (cATM > 1e-12) {
-                    Real sd = blackFormulaImpliedStdDevLiRS(
-                        Option::Call, F0, F0, F0 * cATM);
-                    return std::max(sd / std::sqrt(slices_[0].T), 0.01);
-                }
-            } catch (...) {}
-            return 0.01;
-        }
-        // Edge: deep ITM
-        if (callPrice >= F * 0.9999) {
-            try {
-                Real cATM = callForwardSlice(0, 1.0);
-                Real F0 = forwardAtSlice(0);
-                if (cATM > 1e-12 && t > 1e-8) {
-                    Real sd = blackFormulaImpliedStdDevLiRS(
-                        Option::Call, F0, F0, F0 * cATM);
-                    return sd / std::sqrt(slices_[0].T);
-                }
-            } catch (...) {}
-            return 0.20;
-        }
+        if (callPrice <= intrinsic + 1e-12 * F)
+            return sl.rightWingVol;   // deep OTM call / right wing
+        if (callPrice >= F * 0.9999)
+            return sl.leftWingVol;    // deep ITM call / left wing
 
         // OTM-side inversion for stability
         Option::Type optType;
@@ -402,16 +434,47 @@ namespace QuantLib {
         } else {
             optType = Option::Put;
             price = callPrice - (F - strike);
-            if (price <= 0.0) return 0.01;
+            if (price <= 0.0) return sl.leftWingVol;
         }
 
         try {
             Real stddev = blackFormulaImpliedStdDevLiRS(
                 optType, strike, F, price);
-            return stddev / std::sqrt(t);
+            return stddev / std::sqrt(sl.T);
         } catch (...) {
-            return 0.20;
+            return (x >= 1.0) ? sl.rightWingVol : sl.leftWingVol;
         }
+    }
+
+    Volatility PwlPdfVolSurface::blackVolImpl(Time t, Real strike) const {
+        if (t < 1e-14) t = 1e-14;
+        Size N = slices_.size();
+
+        if (N == 1 || t <= slices_.front().T) {
+            // Before/at first slice: flat vol extrapolation
+            return volAtSlice(*this, 0, strike);
+        }
+        if (t >= slices_.back().T) {
+            // After last slice: flat vol extrapolation
+            return volAtSlice(*this, N - 1, strike);
+        }
+
+        // Between slices: bilinear in total variance
+        Size hi = 0;
+        for (Size i = 1; i < N; ++i)
+            if (slices_[i].T >= t) { hi = i; break; }
+        Size lo = hi - 1;
+        Real alpha = (t - slices_[lo].T) /
+                     (slices_[hi].T - slices_[lo].T);
+
+        Real vol_lo = volAtSlice(*this, lo, strike);
+        Real vol_hi = volAtSlice(*this, hi, strike);
+
+        Real w_lo = vol_lo * vol_lo * slices_[lo].T;
+        Real w_hi = vol_hi * vol_hi * slices_[hi].T;
+        Real w = (1.0 - alpha) * w_lo + alpha * w_hi;
+
+        return std::sqrt(std::max(w, 0.0) / t);
     }
 
 } // namespace QuantLib

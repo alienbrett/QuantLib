@@ -106,12 +106,11 @@ namespace QuantLib {
         // => 0.5 * K^2 * q_x / F
         Real q_val = pdfSurface_->pdfValue(x, t);
         if (q_val < pdfFloor) {
-            Real q_atm = pdfSurface_->pdfValue(1.0, t);  // x=1 is ATM
-            if (q_atm < pdfFloor)
-                return std::max(pdfSurface_->blackVol(t, K, true), volFloor);
-            q_val = q_atm;
-            x = 1.0;
-            K = F;
+            // Wing: PDF too small for Dupire.  Fall back to black vol
+            // which uses flat wing extrapolation at boundary vols.
+            // Flat black vol → local vol = black vol, so this is
+            // self-consistent and keeps local vol finite.
+            return std::max(pdfSurface_->blackVol(t, K, true), volFloor);
         }
 
         Real denominator = 0.5 * K * K * q_val / F;
@@ -197,7 +196,14 @@ namespace QuantLib {
             return std::max(pdfSurface_->blackVol(t, K, true), volFloor);
 
         Real localVol = std::sqrt(localVar);
-        return std::min(std::max(localVol, volFloor), volCap);
+
+        // Relative cap: local vol ≤ 3× black vol at same (t, K).
+        // Prevents transition-zone spikes where PDF is tiny but
+        // above pdfFloor.  blackVol uses flat wing extrapolation
+        // at boundary vols, so the cap is always finite and smooth.
+        Real bvol = std::max(pdfSurface_->blackVol(t, K, true), volFloor);
+        Real relCap = std::min(3.0 * bvol, volCap);
+        return std::min(std::max(localVol, volFloor), relCap);
     }
 
 } // namespace QuantLib

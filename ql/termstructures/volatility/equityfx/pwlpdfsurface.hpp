@@ -45,8 +45,8 @@ namespace QuantLib {
         Call forward prices CF/F are computed by exact polynomial
         integration of the PWL density — no transcendental functions.
 
-        Between expiries, undiscounted call prices at fixed strike
-        are linearly interpolated in time.
+        Between expiries, total variance (σ²·T) at fixed strike is
+        linearly interpolated in time — calendar-arb-free by construction.
 
         \ingroup termstructures
     */
@@ -59,6 +59,10 @@ namespace QuantLib {
             std::vector<Real> x;    // moneyness grid x = K/F (sorted)
             std::vector<Real> q;    // moneyness-space PDF q_x values
             std::vector<Real> h;    // x[i+1] - x[i] (spacings)
+            // Wing flat-vol extrapolation: boundary vols computed from
+            // the innermost grid points where IV inversion succeeds.
+            Real leftWingVol = 0.20;
+            Real rightWingVol = 0.20;
         };
 
         //! Continuous dividend yield only
