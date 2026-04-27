@@ -1262,6 +1262,7 @@ set(QL_HEADERS
     experimental/volatility/zabrinterpolatedsmilesection.hpp
     experimental/volatility/zabrinterpolation.hpp
     experimental/volatility/zabrsmilesection.hpp
+    experimental/volatility/zabrswaptionvol.hpp
     functional.hpp
     grid.hpp
     handle.hpp
