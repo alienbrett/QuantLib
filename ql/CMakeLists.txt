@@ -849,6 +849,8 @@ set(QL_SOURCES
     termstructures/volatility/equityfx/splitrhoessvi.cpp
     termstructures/volatility/equityfx/essvivoltermstructure.cpp
     termstructures/volatility/equityfx/essvilocalvolsurface.cpp
+    termstructures/volatility/equityfx/parametricvoltermstructure.cpp
+    termstructures/volatility/equityfx/parametriclocalvolsurface.cpp
     termstructures/volatility/equityfx/pwlpdfblackvolsurface.cpp
     termstructures/volatility/equityfx/pwlpdfsurface.cpp
     termstructures/volatility/equityfx/pwlpdflocalvolsurface.cpp
@@ -2131,6 +2133,8 @@ set(QL_HEADERS
     termstructures/volatility/equityfx/splitrhoessvi.hpp
     termstructures/volatility/equityfx/essvivoltermstructure.hpp
     termstructures/volatility/equityfx/essvilocalvolsurface.hpp
+    termstructures/volatility/equityfx/parametricvoltermstructure.hpp
+    termstructures/volatility/equityfx/parametriclocalvolsurface.hpp
     termstructures/volatility/equityfx/pwlpdfblackvolsurface.hpp
     termstructures/volatility/equityfx/pwlpdfsurface.hpp
     termstructures/volatility/equityfx/pwlpdflocalvolsurface.hpp

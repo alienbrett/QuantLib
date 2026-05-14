@@ -1,0 +1,403 @@
+/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+
+/*
+ Copyright (C) 2026 Chloride Project
+
+ This file is part of QuantLib, a free-software/open-source library
+ for financial quantitative analysts and developers - http://quantlib.org/
+
+ QuantLib is free software: you can redistribute it and/or modify it
+ under the terms of the QuantLib license.  You should have received a
+ copy of the license along with this program; if not, please email
+ <quantlib-dev@lists.sf.net>. The license is also available online at
+ <https://www.quantlib.org/license.shtml>.
+
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE.  See the license for more details.
+*/
+
+/*! \file parametricvoltermstructure.hpp
+    \brief Klassen-style parametric Black vol surface.
+
+    Per-pillar slice carries an ATF implied vol and a vector of opaque
+    "shape" parameters.  The smile is given by a subclassable
+    ParametricVolShape object, which returns the dimensionless shape
+    function
+
+        f(z; p),   z := log(K/F) / (atm_iv · sqrt(T))   (Klassen normalisation)
+
+    with f(0) = 1.  Implied vol and total variance follow as
+
+        sigma^2(T, K) = atm_iv^2 * f(z; p)
+        w (T, y)      = T * sigma^2 = T * atm_iv^2 * f(z; p),   y = log(K/F).
+
+    Across maturities, total variance is interpolated linearly in T at
+    fixed log-forward moneyness y; left-extrapolation shrinks linearly to
+    w = 0 at t = 0, right-extrapolation holds the slope of the last
+    interval (no parameter extrapolation).
+
+    Calendar arb-freeness is the caller's responsibility — supply slices
+    such that w(y, T) is non-decreasing in T at every y of interest.
+
+    To plug in a custom shape, subclass ParametricVolShape in C++ or, via
+    SWIG director, in Python and implement f(z, params) and dfdz(z, params).
+*/
+
+#ifndef quantlib_parametric_vol_term_structure_hpp
+#define quantlib_parametric_vol_term_structure_hpp
+
+#include <ql/termstructures/volatility/equityfx/blackvoltermstructure.hpp>
+#include <ql/termstructures/yieldtermstructure.hpp>
+#include <ql/instruments/dividendschedule.hpp>
+#include <ql/quote.hpp>
+#include <ql/handle.hpp>
+#include <ql/shared_ptr.hpp>
+#include <ql/time/daycounters/actual365fixed.hpp>
+#include <vector>
+
+namespace QuantLib {
+
+    //! Abstract dimensionless smile shape (Klassen z-parametrization).
+    /*! Implementations return f(z; params), the dimensionless smile
+        relative to ATF, where z = log(K/F) / (atm_iv * sqrt(T)) is the
+        normalized log-moneyness.  Total variance is then
+
+            w(T, y) = T * atm_iv^2 * f(z; params)
+
+        with f(0) = 1 by convention.
+
+        Subclass in C++, or in Python via SWIG director, and override
+        f() and dfdz().
+    */
+    class ParametricVolShape {
+      public:
+        virtual ~ParametricVolShape() = default;
+
+        //! Dimensionless shape f(z; params).  Must satisfy f(0) = 1.
+        virtual Real f(Real z, const std::vector<Real>& params) const = 0;
+
+        //! Strike derivative d f / d z (in normalized space).
+        virtual Real dfdz(Real z, const std::vector<Real>& params) const = 0;
+
+        //! Second strike derivative d² f / d z² (normalized space).
+        /*! Default implementation: central FD on `dfdz` with step `h`.
+            Built-in shapes (S3, JW) override with closed forms; Python
+            subclasses fall back to FD automatically.  The `h` knob is
+            ignored by analytic overrides and exists only so the FD path
+            remains tunable from the surface (butterflyDensity, Dupire). */
+        virtual Real d2fdz2(Real z,
+                            const std::vector<Real>& params,
+                            Real h = 1e-4) const;
+
+        //! Parameter Jacobian: vector of ∂f/∂params_i at fixed z.
+        /*! Default implementation: central FD on `f`.  Built-in shapes
+            (S3, JW) override with closed forms; Python subclasses fall
+            back to FD automatically. */
+        virtual std::vector<Real> dfdParams(
+            Real z, const std::vector<Real>& params) const;
+    };
+
+    //! S3 / SSVI shape: 3-parameter Klassen / Gatheral-Jacquier smile.
+    /*! params = (s2, c2) with c2 >= 0 (s2 unconstrained but typically
+        negative for equities).  Closed form:
+
+            f(z) = 0.5 * (1 + s2*z)
+                   + sqrt( 0.25 * (1 + s2*z)^2 + 0.5 * c2 * z^2 )
+
+        f(0) = 1, f'(0) = s2, f''(0) = c2 - s2^2/2  (Klassen's "natural"
+        dimensionless skew and curvature definitions match s2 and c2).
+        Butterfly arb-free on the full (sigma_hat0, s2, c2) cube via the
+        S3 closed-form bound (see Klassen 2017 §3).
+    */
+    class S3Shape : public ParametricVolShape {
+      public:
+        //! params = (s2, c2), c2 >= 0.
+        Real f(Real z, const std::vector<Real>& params) const override;
+        Real dfdz(Real z, const std::vector<Real>& params) const override;
+        Real d2fdz2(Real z, const std::vector<Real>& params,
+                    Real h = 1e-4) const override;
+        std::vector<Real> dfdParams(
+            Real z, const std::vector<Real>& params) const override;
+    };
+
+    //! JW (Jump-Wing) shape: 5-parameter Klassen-style smile with
+    //! independent left/right wing curvatures.
+    /*! params = (s2, c_minus, c_plus) with c_minus, c_plus >= 0.
+        The slice atmIv carries the ATF level so 4 shape params + atmIv
+        = 5 free parameters per slice.
+
+        Piecewise S3:
+
+            f(z) = 0.5 * (1 + s2*z)
+                   + sqrt( 0.25 * (1 + s2*z)^2 + 0.5 * c(z) * z^2 )
+
+        with  c(z) = c_minus  if z < 0  else  c_plus.
+
+        f(0) = 1, f'(0) = s2 (continuous from both sides; f''(0) is
+        discontinuous when c_minus != c_plus, but bounded and harmless
+        for fitting).
+
+        Wing asymptotics (z -> ±inf):
+            C_plus  = 0.5*s2 + sqrt(0.25*s2^2 + 0.5*c_plus)
+            C_minus = sqrt(0.25*s2^2 + 0.5*c_minus) - 0.5*s2
+
+        Reduces to S3 when c_minus = c_plus = c2.  Use for liquid
+        underliers (ES/SPX/SPY/AAPL) where independent wing slopes are
+        empirically required.
+    */
+    class JWShape : public ParametricVolShape {
+      public:
+        //! params = (s2, c_minus, c_plus), both c's >= 0.
+        Real f(Real z, const std::vector<Real>& params) const override;
+        Real dfdz(Real z, const std::vector<Real>& params) const override;
+        Real d2fdz2(Real z, const std::vector<Real>& params,
+                    Real h = 1e-4) const override;
+        std::vector<Real> dfdParams(
+            Real z, const std::vector<Real>& params) const override;
+    };
+
+    //! Per-pillar slice spec for ParametricVolTermStructure.
+    struct ParametricVolSlice {
+        Real atmIv;                  //!< ATF implied vol at this maturity, > 0
+        std::vector<Real> params;    //!< shape params, opaque to the surface
+    };
+
+    //! Black vol surface from a subclassable Klassen-style smile shape.
+    class ParametricVolTermStructure : public BlackVolatilityTermStructure {
+      public:
+        //! Construct (continuous dividend yield only).
+        ParametricVolTermStructure(
+            const Date& referenceDate,
+            const std::vector<Date>& dates,
+            const std::vector<ParametricVolSlice>& slices,
+            ext::shared_ptr<ParametricVolShape> shape,
+            Handle<Quote> spot,
+            Handle<YieldTermStructure> riskFreeRate,
+            Handle<YieldTermStructure> dividendYield,
+            const DayCounter& dc = Actual365Fixed());
+
+        //! Construct with discrete dividends.
+        ParametricVolTermStructure(
+            const Date& referenceDate,
+            const std::vector<Date>& dates,
+            const std::vector<ParametricVolSlice>& slices,
+            ext::shared_ptr<ParametricVolShape> shape,
+            Handle<Quote> spot,
+            Handle<YieldTermStructure> riskFreeRate,
+            Handle<YieldTermStructure> dividendYield,
+            DividendSchedule dividends,
+            const DayCounter& dc = Actual365Fixed());
+
+        //! \name TermStructure interface
+        //@{
+        Date maxDate() const override { return Date::maxDate(); }
+        //@}
+
+        //! \name VolatilityTermStructure interface
+        //@{
+        Real minStrike() const override { return QL_MIN_REAL; }
+        Real maxStrike() const override { return QL_MAX_REAL; }
+        //@}
+
+        //! \name Inspectors
+        //@{
+        Size numSlices() const { return slices_.size(); }
+        const std::vector<Time>& maturities() const { return T_; }
+        const std::vector<ParametricVolSlice>& slices() const { return slices_; }
+        const ParametricVolSlice& slice(Size i) const { return slices_.at(i); }
+        const ext::shared_ptr<ParametricVolShape>& shape() const { return shape_; }
+        //@}
+
+        //! \name Direct access to the shape (bypasses BlackVol interface)
+        //@{
+        //! Normalized strike z at pillar i for log-moneyness k.
+        Real z(Size sliceIdx, Real k) const;
+        //! Total variance at pillar slice i for log-moneyness k.
+        Real totalVariance(Size sliceIdx, Real k) const;
+        //! Total variance at arbitrary (k, t), interpolated in T.
+        Real totalVariance(Real k, Time t) const;
+        //! d w / d k at pillar slice i.
+        Real totalVarianceStrikeDerivative(Size sliceIdx, Real k) const;
+        //! d w / d k at arbitrary (k, t), interpolated in T.
+        Real totalVarianceStrikeDerivative(Real k, Time t) const;
+        //! d² w / d k² at pillar slice i.
+        Real totalVarianceStrikeSecondDerivative(Size sliceIdx, Real k) const;
+        //! d² w / d k² at arbitrary (k, t), interpolated in T.
+        Real totalVarianceStrikeSecondDerivative(Real k, Time t) const;
+        //! ∂w/∂T at fixed log-moneyness k.  Right-continuous on pillars.
+        /*! Linear-in-w time interpolation gives a piecewise-constant
+            slope per pillar interval.  Left-extrapolation slope is
+            w(slice 0, k) / T_0; right-extrapolation reuses the slope
+            of the last interior interval.  Throws on a single-pillar
+            surface (Dupire is degenerate). */
+        Real totalVarianceTimeDerivative(Real k, Time t) const;
+        //! Forward F(t) used internally for strike <-> k.
+        Real forward(Time t) const;
+        //@}
+
+        //! \name Analytic Dupire local volatility
+        //@{
+        /*! σ²_loc(K, T) at log-moneyness k = log(K / F(T)) and maturity
+            t > 0.  Uses the standard Gatheral form
+
+              σ²_loc = ∂w/∂T / [ 1 − k/w·∂w/∂k
+                                + ¼(−¼ − 1/w + k²/w²)·(∂w/∂k)²
+                                + ½·∂²w/∂k² ]
+
+            Throws if the denominator is non-positive (a calendar or
+            butterfly arb violation has corrupted the Dupire identity)
+            or the surface has fewer than two pillars. */
+        Real localVariance(Real k, Time t) const;
+        //! σ_loc(K, T) = √localVariance(k, t).
+        Real localVol(Real k, Time t) const;
+        //@}
+
+        //! \name Mutators
+        //@{
+        //! Replace (atm_iv, params) at pillar i and notify observers.
+        void setSlice(Size i, Real atmIv, const std::vector<Real>& params);
+        //! Replace all slice (atm_iv, params), keeping pillar dates.
+        void setSlices(const std::vector<ParametricVolSlice>& slices);
+        //@}
+
+        //! \name Batch evaluation (for sequential / global LM fitters)
+        //@{
+        /*! Black vols at a list of (sliceIdx, strike) pairs.  Skips the
+            time interpolation — evaluates each observation directly at
+            its pillar.  Useful when the fitter walks a single slice. */
+        std::vector<Real> batchBlackVol(
+            const std::vector<Size>& sliceIndices,
+            const std::vector<Real>& strikes) const;
+
+        /*! Black vols at a list of (maturity, strike) pairs with time
+            interpolation.  Mirrors EssviVolatilityTermStructure's
+            equivalent batch API. */
+        std::vector<Real> batchBlackVolAtTimes(
+            const std::vector<Real>& times,
+            const std::vector<Real>& strikes) const;
+
+        /*! Per-observation gradient ∂σ/∂(atm_iv, params...) at each
+            (sliceIdx, K).  Returns flat row-major array of size
+            n_obs · (1 + n_shape) where n_shape = slice(0).params.size().
+
+            Layout per row: [∂σ/∂atm_iv, ∂σ/∂params[0], ..., ∂σ/∂params[n_shape-1]]
+
+            Gradients are local to the obs's slice (no cross-pillar
+            coupling).  Caller scatters into the global Jacobian using
+            sliceIndices. */
+        std::vector<Real> batchImpliedVolGradient(
+            const std::vector<Size>& sliceIndices,
+            const std::vector<Real>& strikes) const;
+
+        //! Number of shape params per slice (all slices share the same count).
+        Size nShapeParams() const {
+            return slices_.empty() ? 0 : slices_.front().params.size();
+        }
+        //@}
+
+        //! \name Arbitrage checks (Klassen 2017 §3)
+        //@{
+        /*! Implied density g(z) at pillar i for normalized strike z.
+            Computed via the Klassen formula
+
+              g(z) = (1 − z·f'/(2f))² − ¼·(f')²/f
+                     − (sigma_hat0²/16)·(f')²
+                     + ½·f''
+
+            with f, f' from the shape callable and f'' from a central
+            FD on f' (so this works for any shape, including Python
+            subclasses).  Butterfly arb-free <=> g(z) >= 0 at every z. */
+        Real butterflyDensity(Size sliceIdx, Real z, Real h = 1e-4) const;
+
+        /*! Maximum butterfly-arb violation magnitude at pillar i,
+            scanned over the supplied z grid.  Returns
+              max( 0, -min_g )
+            where min_g is the minimum g(z) on the grid.  Zero <=>
+            no butterfly violation on the grid. */
+        Real butterflyArbViolation(Size sliceIdx,
+                                   const std::vector<Real>& zGrid,
+                                   Real h = 1e-4) const;
+
+        /*! Maximum calendar-arb violation magnitude across consecutive
+            pillar pairs, scanned at the supplied log-moneyness grid.
+            Returns
+              max_i max_k max(0, w(T_i, k) - w(T_{i+1}, k))
+            Zero <=> no calendar violation at any (k, pillar-pair) on
+            the grid. */
+        Real calendarArbViolation(const std::vector<Real>& kGrid) const;
+        //@}
+
+        //! \name Constraint-grid evaluators (for SLSQP / trust-constr)
+        //@{
+        /*! Butterfly density g(z) at every (pillar i, z in zGrid).
+
+            Returns flat row-major array of size N · n_z.  Row major:
+            [i=0,z=0], [i=0,z=1], ..., [i=0,z=n_z-1], [i=1,z=0], ...
+
+            Use as the "value" output of a scipy-style inequality
+            constraint `g(z) >= 0`. */
+        std::vector<Real> butterflyDensityGrid(
+            const std::vector<Real>& zGrid, Real h = 1e-4) const;
+
+        /*! Jacobian of butterflyDensityGrid w.r.t. each slice's own
+            (atm_iv, params) — sparse per slice, no cross-pillar
+            coupling.  Returns flat array of size N · n_z · (1 + n_shape).
+
+            Element layout: row-major (slice, z, param) — for each row
+            (i, j), the (1 + n_shape) gradient w.r.t. slice i's
+            (atm_iv_i, params_i[0..n_shape-1]).
+
+            Caller scatters into the full (N · n_z, N · (1 + n_shape))
+            Jacobian using slice_i for each row. */
+        std::vector<Real> butterflyDensityGridGradient(
+            const std::vector<Real>& zGrid, Real h = 1e-4) const;
+
+        /*! Calendar deficits w_{i}(k) - w_{i-1}(k) at every
+            (pillar pair, k in kGrid) for i = 1 .. N-1.
+
+            Returns flat row-major of size (N-1) · n_k.  Non-negative
+            values mean the surface is calendar-arb-free at that (k,
+            pair).  Use directly as a scipy inequality constraint
+            `deficit >= 0`. */
+        std::vector<Real> calendarDeficitGrid(
+            const std::vector<Real>& kGrid) const;
+
+        /*! Jacobian of calendarDeficitGrid w.r.t. all per-slice params.
+
+            For pair (i-1, i) row j (k = kGrid[j]):
+              ∂(w_i - w_{i-1})/∂params_i      → +∂w_i/∂params_i
+              ∂(w_i - w_{i-1})/∂params_{i-1}  → -∂w_{i-1}/∂params_{i-1}
+            All other entries zero.
+
+            Returns flat array of size (N-1) · n_k · 2 · (1 + n_shape).
+            Row layout for each (pair_idx, k):
+              [grad_w_lower (1+n_shape), grad_w_upper (1+n_shape)]
+            Caller scatters using the pair indices (i-1, i). */
+        std::vector<Real> calendarDeficitGridGradient(
+            const std::vector<Real>& kGrid) const;
+        //@}
+
+      protected:
+        Volatility blackVolImpl(Time t, Real strike) const override;
+
+      private:
+        struct TimeWeights {
+            Size sLo, sHi;
+            Real wLo, wHi;
+            bool leftExtrap;
+        };
+        TimeWeights timeWeights(Time t) const;
+
+        std::vector<Time>                  T_;
+        std::vector<ParametricVolSlice>    slices_;
+        ext::shared_ptr<ParametricVolShape> shape_;
+        Handle<Quote>                      spot_;
+        Handle<YieldTermStructure>         riskFreeRate_;
+        Handle<YieldTermStructure>         dividendYield_;
+        DividendSchedule                   dividends_;
+    };
+
+} // namespace QuantLib
+
+#endif

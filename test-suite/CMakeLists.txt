@@ -149,6 +149,7 @@ set(QL_TEST_SOURCES
     solvers.cpp
     squarerootclvmodel.cpp
     stats.cpp
+    parametricvoltermstructure.cpp
     svivolatility.cpp
     swap.cpp
     swapforwardmappings.cpp

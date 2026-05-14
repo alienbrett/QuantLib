@@ -148,6 +148,7 @@ QL_TEST_SRCS = \
 	solvers.cpp \
 	squarerootclvmodel.cpp \
 	stats.cpp \
+	parametricvoltermstructure.cpp \
 	svivolatility.cpp \
 	swap.cpp \
 	swapforwardmappings.cpp \
