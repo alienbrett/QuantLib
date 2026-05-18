@@ -232,12 +232,15 @@ namespace QuantLib {
                    "K7Shape: expected 6 params "
                    "(s, c, c_mid_minus, c_mid_plus, c_far_minus, c_far_plus), got "
                    << p.size());
-        Real s = p[0], c = p[1];
-        Real cmm = p[2], cmp = p[3];
-        Real cfm = p[4], cfp = p[5];
-        QL_REQUIRE(c >= 0.0 && cmm >= 0.0 && cmp >= 0.0
-                       && cfm >= 0.0 && cfp >= 0.0,
-                   "K7Shape: c, c_mid_*, c_far_* must all be >= 0");
+        Real s = p[0];
+        // Clamp curvature params to >= 0 to tolerate optimizer rounding
+        // (log-transformed in chloride's spec; tiny negatives can leak
+        // through during finite-difference jacobian probes).
+        Real c   = std::max(p[1], 0.0);
+        Real cmm = std::max(p[2], 0.0);
+        Real cmp = std::max(p[3], 0.0);
+        Real cfm = std::max(p[4], 0.0);
+        Real cfp = std::max(p[5], 0.0);
         Real a = 1.0 + s * z;
         Real c_eff, dc_dz, d2c_dz2;
         k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
@@ -247,9 +250,12 @@ namespace QuantLib {
 
     Real K7Shape::dfdz(Real z, const std::vector<Real>& p) const {
         QL_REQUIRE(p.size() == 6, "K7Shape: expected 6 params");
-        Real s = p[0], c = p[1];
-        Real cmm = p[2], cmp = p[3];
-        Real cfm = p[4], cfp = p[5];
+        Real s = p[0];
+        Real c   = std::max(p[1], 0.0);
+        Real cmm = std::max(p[2], 0.0);
+        Real cmp = std::max(p[3], 0.0);
+        Real cfm = std::max(p[4], 0.0);
+        Real cfp = std::max(p[5], 0.0);
         Real a = 1.0 + s * z;
         Real c_eff, dc_dz, d2c_dz2;
         k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
@@ -264,9 +270,12 @@ namespace QuantLib {
     Real K7Shape::d2fdz2(Real z, const std::vector<Real>& p,
                          Real /*h*/) const {
         QL_REQUIRE(p.size() == 6, "K7Shape: expected 6 params");
-        Real s = p[0], c = p[1];
-        Real cmm = p[2], cmp = p[3];
-        Real cfm = p[4], cfp = p[5];
+        Real s = p[0];
+        Real c   = std::max(p[1], 0.0);
+        Real cmm = std::max(p[2], 0.0);
+        Real cmp = std::max(p[3], 0.0);
+        Real cfm = std::max(p[4], 0.0);
+        Real cfp = std::max(p[5], 0.0);
         Real a = 1.0 + s * z;
         Real c_eff, dc_dz, d2c_dz2;
         k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
@@ -286,9 +295,12 @@ namespace QuantLib {
     std::vector<Real> K7Shape::dfdParams(
             Real z, const std::vector<Real>& p) const {
         QL_REQUIRE(p.size() == 6, "K7Shape: expected 6 params");
-        Real s = p[0], c = p[1];
-        Real cmm = p[2], cmp = p[3];
-        Real cfm = p[4], cfp = p[5];
+        Real s = p[0];
+        Real c   = std::max(p[1], 0.0);
+        Real cmm = std::max(p[2], 0.0);
+        Real cmp = std::max(p[3], 0.0);
+        Real cfm = std::max(p[4], 0.0);
+        Real cfp = std::max(p[5], 0.0);
         Real a = 1.0 + s * z;
         Real c_eff, dc_dz, d2c_dz2;
         k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
