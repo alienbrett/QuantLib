@@ -157,6 +157,59 @@ namespace QuantLib {
             Real z, const std::vector<Real>& params) const override;
     };
 
+    //! K7 shape: two-knot tanh-blended smile decoupling ATF / mid-wing /
+    //! far-wing curvatures.
+    /*! params = (s, c, c_mid_minus, c_mid_plus, c_far_minus, c_far_plus),
+        all c's >= 0.  Six shape params + atmIv = 7 total per slice.
+
+        Motivation: JW (3-param) and S3 (2-param) have a unique curvature
+        maximum at ATF.  On long-dated SPX/SPY LEAPs the market wants HIGH
+        curvature at moderate |z| and a PLATEAU (or reduced curvature) at
+        far OTM.  K5's single tanh^2(z/2) blend is also dormant in the
+        LEAP data range (small z due to long T).  K7 introduces a SECOND,
+        tighter blend knot so the smile can ramp up between mu_1 = 0.5
+        (inner-wing) and mu_2 = 2.0 (outer-wing) independently.
+
+        Closed form:
+
+            f(z)        = 0.5 * (1 + s*z) + sqrt( R(z) )
+            R(z)        = 0.25 * (1+sz)^2 + 0.5 * c_eff(z) * z^2
+            c_eff(z)    = c
+                        + (c_mid(z) - c) * tanh^2(z / mu_1)
+                        + (c_far(z) - c_mid(z)) * tanh^2(z / mu_2)
+            c_mid(z)    = c_mid_minus if z<0 else c_mid_plus
+            c_far(z)    = c_far_minus if z<0 else c_far_plus
+            mu_1        = 0.5,  mu_2 = 2.0  (fixed)
+
+        Properties:
+          f(0)  = 1, f'(0) = s, f''(0) = c   (ATF identity + ATF curvature)
+          Wing asymptote: f(z) ~ |z| * C_pm with
+            C_plus  = 0.5*s + sqrt(0.25*s^2 + 0.5*c_far_plus)
+            C_minus = sqrt(0.25*s^2 + 0.5*c_far_minus) - 0.5*s
+          R-positivity: c_eff is a convex combination of (c, c_mid, c_far)
+          with non-negative weights (1-T_1, T_1-T_2, T_2), so c_eff >= 0
+          when all three are >= 0 -- and hence R(z) >= 0 by construction.
+
+          c_far governs the Lee bound; c_mid is "transient" mid-wing
+          curvature that doesn't affect the asymptote.  This decouples
+          mid-wing acceleration from far-wing slope, exactly the
+          flexibility long-dated SPX/SPY smiles need.
+
+        Reduces to S3 when c = c_mid_pm = c_far_pm.
+        Approaches K5 (single blend at mu=2) when c_mid_pm = c.
+    */
+    class K7Shape : public ParametricVolShape {
+      public:
+        //! params = (s, c, c_mid_minus, c_mid_plus, c_far_minus, c_far_plus),
+        //! all c's >= 0.
+        Real f(Real z, const std::vector<Real>& params) const override;
+        Real dfdz(Real z, const std::vector<Real>& params) const override;
+        Real d2fdz2(Real z, const std::vector<Real>& params,
+                    Real h = 1e-4) const override;
+        std::vector<Real> dfdParams(
+            Real z, const std::vector<Real>& params) const override;
+    };
+
     //! Per-pillar slice spec for ParametricVolTermStructure.
     struct ParametricVolSlice {
         Real atmIv;                  //!< ATF implied vol at this maturity, > 0

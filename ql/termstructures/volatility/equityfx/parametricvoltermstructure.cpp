@@ -181,6 +181,146 @@ namespace QuantLib {
     }
 
 
+    // ===== K7Shape ============================================================
+
+    namespace {
+        // Fixed blend widths.  Could be made per-slice params in a future K9.
+        constexpr Real K7_MU_1 = 0.5;   // inner-wing knot
+        constexpr Real K7_MU_2 = 2.0;   // outer-wing knot
+
+        struct K7Blend {
+            Real T1, T2;             // tanh^2(z/mu_k)
+            Real T1p, T2p;           // d/dz tanh^2(z/mu_k)
+            Real T1pp, T2pp;         // d^2/dz^2 tanh^2(z/mu_k)
+        };
+
+        inline K7Blend k7BlendAt(Real z) {
+            Real u1 = z / K7_MU_1;
+            Real u2 = z / K7_MU_2;
+            Real th1 = std::tanh(u1);
+            Real th2 = std::tanh(u2);
+            Real sech2_1 = 1.0 - th1 * th1;
+            Real sech2_2 = 1.0 - th2 * th2;
+            K7Blend b;
+            b.T1 = th1 * th1;
+            b.T2 = th2 * th2;
+            // d/dz tanh^2(z/mu) = (2/mu) * tanh(z/mu) * sech^2(z/mu)
+            b.T1p = (2.0 / K7_MU_1) * th1 * sech2_1;
+            b.T2p = (2.0 / K7_MU_2) * th2 * sech2_2;
+            // d^2/dz^2 tanh^2(z/mu) = (2/mu^2) * sech^2(z/mu) * (1 - 3*tanh^2)
+            b.T1pp = (2.0 / (K7_MU_1 * K7_MU_1)) * sech2_1
+                     * (1.0 - 3.0 * b.T1);
+            b.T2pp = (2.0 / (K7_MU_2 * K7_MU_2)) * sech2_2
+                     * (1.0 - 3.0 * b.T2);
+            return b;
+        }
+
+        inline void k7CEff(Real z,
+                           Real c, Real cmm, Real cmp, Real cfm, Real cfp,
+                           Real& c_eff, Real& dc_dz, Real& d2c_dz2) {
+            K7Blend b = k7BlendAt(z);
+            Real c_mid = (z < 0.0) ? cmm : cmp;
+            Real c_far = (z < 0.0) ? cfm : cfp;
+            c_eff   = c + (c_mid - c) * b.T1 + (c_far - c_mid) * b.T2;
+            dc_dz   = (c_mid - c) * b.T1p + (c_far - c_mid) * b.T2p;
+            d2c_dz2 = (c_mid - c) * b.T1pp + (c_far - c_mid) * b.T2pp;
+        }
+    }
+
+    Real K7Shape::f(Real z, const std::vector<Real>& p) const {
+        QL_REQUIRE(p.size() == 6,
+                   "K7Shape: expected 6 params "
+                   "(s, c, c_mid_minus, c_mid_plus, c_far_minus, c_far_plus), got "
+                   << p.size());
+        Real s = p[0], c = p[1];
+        Real cmm = p[2], cmp = p[3];
+        Real cfm = p[4], cfp = p[5];
+        QL_REQUIRE(c >= 0.0 && cmm >= 0.0 && cmp >= 0.0
+                       && cfm >= 0.0 && cfp >= 0.0,
+                   "K7Shape: c, c_mid_*, c_far_* must all be >= 0");
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        return 0.5 * a + std::sqrt(std::max(R, 0.0));
+    }
+
+    Real K7Shape::dfdz(Real z, const std::vector<Real>& p) const {
+        QL_REQUIRE(p.size() == 6, "K7Shape: expected 6 params");
+        Real s = p[0], c = p[1];
+        Real cmm = p[2], cmp = p[3];
+        Real cfm = p[4], cfp = p[5];
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        if (R <= 0.0)
+            return 0.5 * s;
+        // R' = (1/2) s (1 + s z) + (1/2) c_eff' z^2 + c_eff z
+        Real Rp = 0.5 * s * a + 0.5 * dc_dz * z * z + c_eff * z;
+        return 0.5 * s + Rp / (2.0 * std::sqrt(R));
+    }
+
+    Real K7Shape::d2fdz2(Real z, const std::vector<Real>& p,
+                         Real /*h*/) const {
+        QL_REQUIRE(p.size() == 6, "K7Shape: expected 6 params");
+        Real s = p[0], c = p[1];
+        Real cmm = p[2], cmp = p[3];
+        Real cfm = p[4], cfp = p[5];
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        if (R <= 0.0)
+            return 0.0;
+        Real r = std::sqrt(R);
+        Real Rp = 0.5 * s * a + 0.5 * dc_dz * z * z + c_eff * z;
+        // R'' = (1/2) s^2 + (1/2) c_eff'' z^2 + 2 c_eff' z + c_eff
+        Real Rpp = 0.5 * s * s + 0.5 * d2c_dz2 * z * z
+                   + 2.0 * dc_dz * z + c_eff;
+        // f' = (1/2) s + R'/(2 sqrt(R))   (linear-in-z half drops out of f'')
+        // f'' = R''/(2 r) - R'^2 / (4 r^3)
+        return Rpp / (2.0 * r) - (Rp * Rp) / (4.0 * r * R);
+    }
+
+    std::vector<Real> K7Shape::dfdParams(
+            Real z, const std::vector<Real>& p) const {
+        QL_REQUIRE(p.size() == 6, "K7Shape: expected 6 params");
+        Real s = p[0], c = p[1];
+        Real cmm = p[2], cmp = p[3];
+        Real cfm = p[4], cfp = p[5];
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k7CEff(z, c, cmm, cmp, cfm, cfp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        Real sqrtR = (R > 0.0) ? std::sqrt(R) : 1.0;  // guarded; R>0 in fit
+        K7Blend b = k7BlendAt(z);
+
+        // f = (1/2) a + sqrt(R), so df/dq = (dR/dq) / (2 sqrt(R)) for any
+        // shape param q != s (where the (1/2) a term also contributes).
+        // c_eff = c (1 - T1) + c_mid (T1 - T2) + c_far T2
+        // dR/dq = (1/2) (dc_eff/dq) z^2
+
+        // d/ds : also contributes via (1/2) a
+        Real ds = 0.5 * z + 0.25 * a * z / sqrtR;
+
+        // d/dc
+        Real dc = 0.5 * z * z * (1.0 - b.T1) / (2.0 * sqrtR);
+
+        // d/dc_mid_minus, d/dc_mid_plus : (T1 - T2) on respective side
+        Real dc_mid_factor = 0.5 * z * z * (b.T1 - b.T2) / (2.0 * sqrtR);
+        Real dcmm = (z < 0.0) ? dc_mid_factor : 0.0;
+        Real dcmp = (z >= 0.0) ? dc_mid_factor : 0.0;
+
+        // d/dc_far_minus, d/dc_far_plus : T2 on respective side
+        Real dc_far_factor = 0.5 * z * z * b.T2 / (2.0 * sqrtR);
+        Real dcfm = (z < 0.0) ? dc_far_factor : 0.0;
+        Real dcfp = (z >= 0.0) ? dc_far_factor : 0.0;
+
+        return {ds, dc, dcmm, dcmp, dcfm, dcfp};
+    }
+
+
     // ===== ParametricVolTermStructure =========================================
 
     namespace {
