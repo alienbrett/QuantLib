@@ -12,5 +12,6 @@
 #include <ql/time/daycounters/simpledaycounter.hpp>
 #include <ql/time/daycounters/thirty360.hpp>
 #include <ql/time/daycounters/thirty365.hpp>
+#include <ql/time/daycounters/weighted.hpp>
 #include <ql/time/daycounters/yearfractiontodate.hpp>
 
