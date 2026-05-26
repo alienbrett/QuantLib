@@ -157,6 +157,49 @@ namespace QuantLib {
             Real z, const std::vector<Real>& params) const override;
     };
 
+    //! K5 shape: tanh^2 blend between independent ATF curvature and
+    //! per-side wing curvatures.
+    /*! params = (s, c, c_minus, c_plus), all >= 0 except s (skew).
+        Four shape params + atmIv = 5 free parameters per slice.
+
+        Decouples ATF curvature `c` from wing slopes via a single
+        tanh^2 blend with fixed width mu = 2.0 (centered on z = +/- 2sigma):
+
+            f(z)        = 0.5 * (1 + s*z) + sqrt( R(z) )
+            R(z)        = 0.25 * (1+sz)^2 + 0.5 * c_eff(z) * z^2
+            c_eff(z)    = c + (c_wing(z) - c) * tanh^2(z / mu)
+            c_wing(z)   = c_minus if z<0 else c_plus
+            mu          = 2.0  (fixed)
+
+        Properties:
+          f(0)  = 1, f'(0) = s, f''(0) = c   (ATF identity + ATF curvature
+                                              independent of c_wing)
+          Wing asymptote (tanh^2 -> 1 as |z| -> inf):
+            C_plus  = 0.5*s + sqrt(0.25*s^2 + 0.5*c_plus)
+            C_minus = sqrt(0.25*s^2 + 0.5*c_minus) - 0.5*s
+          R-positivity: c_eff = (1-T)*c + T*c_wing is a convex combination
+          with non-negative weights, so c_eff >= 0 whenever
+          c, c_wing >= 0 -- and hence R(z) >= 0 by construction.
+
+        Use vs JW: JW couples ATF curvature and wing slope through the
+        same per-side `c` parameter, so flat ATF + high wings is
+        unreachable.  K5 separates the two with a smooth tanh^2 blend,
+        which is exactly what symmetric / U-shaped smiles (TLT, XLF,
+        bond/credit ETFs) need.
+
+        Reduces to S3 when c = c_minus = c_plus.
+    */
+    class K5Shape : public ParametricVolShape {
+      public:
+        //! params = (s, c, c_minus, c_plus), c/c_minus/c_plus >= 0.
+        Real f(Real z, const std::vector<Real>& params) const override;
+        Real dfdz(Real z, const std::vector<Real>& params) const override;
+        Real d2fdz2(Real z, const std::vector<Real>& params,
+                    Real h = 1e-4) const override;
+        std::vector<Real> dfdParams(
+            Real z, const std::vector<Real>& params) const override;
+    };
+
     //! K7 shape: two-knot tanh-blended smile decoupling ATF / mid-wing /
     //! far-wing curvatures.
     /*! params = (s, c, c_mid_minus, c_mid_plus, c_far_minus, c_far_plus),

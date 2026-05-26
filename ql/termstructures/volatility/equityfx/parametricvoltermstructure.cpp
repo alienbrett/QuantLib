@@ -181,6 +181,130 @@ namespace QuantLib {
     }
 
 
+    // ===== K5Shape ============================================================
+
+    namespace {
+        constexpr Real K5_MU = 2.0;   // fixed tanh^2 blend width
+
+        struct K5Blend {
+            Real T;       // tanh^2(z/mu)
+            Real Tp;      // d/dz tanh^2(z/mu) = (2/mu) tanh(u) sech^2(u)
+            Real Tpp;     // d^2/dz^2 tanh^2(z/mu) = (2/mu^2) sech^2 (1 - 3 tanh^2)
+        };
+
+        inline K5Blend k5BlendAt(Real z) {
+            Real u = z / K5_MU;
+            Real th = std::tanh(u);
+            Real sech2 = 1.0 - th * th;
+            K5Blend b;
+            b.T   = th * th;
+            b.Tp  = (2.0 / K5_MU) * th * sech2;
+            b.Tpp = (2.0 / (K5_MU * K5_MU)) * sech2 * (1.0 - 3.0 * b.T);
+            return b;
+        }
+
+        inline void k5CEff(Real z, Real c, Real cm, Real cp,
+                           Real& c_eff, Real& dc_dz, Real& d2c_dz2) {
+            K5Blend b = k5BlendAt(z);
+            Real c_wing = (z < 0.0) ? cm : cp;
+            c_eff   = c + (c_wing - c) * b.T;
+            dc_dz   = (c_wing - c) * b.Tp;
+            d2c_dz2 = (c_wing - c) * b.Tpp;
+        }
+    }
+
+    Real K5Shape::f(Real z, const std::vector<Real>& p) const {
+        QL_REQUIRE(p.size() == 4,
+                   "K5Shape: expected 4 params (s, c, c_minus, c_plus), got "
+                   << p.size());
+        Real s = p[0];
+        // Clamp curvature params to >= 0 to tolerate finite-difference
+        // optimizer probes that occasionally cross zero (chloride
+        // log-transforms but the FD step lands the raw param slightly
+        // negative).
+        Real c  = std::max(p[1], 0.0);
+        Real cm = std::max(p[2], 0.0);
+        Real cp = std::max(p[3], 0.0);
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k5CEff(z, c, cm, cp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        return 0.5 * a + std::sqrt(std::max(R, 0.0));
+    }
+
+    Real K5Shape::dfdz(Real z, const std::vector<Real>& p) const {
+        QL_REQUIRE(p.size() == 4,
+                   "K5Shape: expected 4 params (s, c, c_minus, c_plus), got "
+                   << p.size());
+        Real s = p[0];
+        Real c  = std::max(p[1], 0.0);
+        Real cm = std::max(p[2], 0.0);
+        Real cp = std::max(p[3], 0.0);
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k5CEff(z, c, cm, cp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        if (R <= 0.0)
+            return 0.5 * s;
+        Real Rp = 0.5 * s * a + 0.5 * dc_dz * z * z + c_eff * z;
+        return 0.5 * s + Rp / (2.0 * std::sqrt(R));
+    }
+
+    Real K5Shape::d2fdz2(Real z, const std::vector<Real>& p,
+                         Real /*h*/) const {
+        QL_REQUIRE(p.size() == 4,
+                   "K5Shape: expected 4 params (s, c, c_minus, c_plus), got "
+                   << p.size());
+        Real s = p[0];
+        Real c  = std::max(p[1], 0.0);
+        Real cm = std::max(p[2], 0.0);
+        Real cp = std::max(p[3], 0.0);
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k5CEff(z, c, cm, cp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        if (R <= 0.0)
+            return 0.0;
+        Real r = std::sqrt(R);
+        Real Rp = 0.5 * s * a + 0.5 * dc_dz * z * z + c_eff * z;
+        Real Rpp = 0.5 * s * s + 0.5 * d2c_dz2 * z * z
+                   + 2.0 * dc_dz * z + c_eff;
+        return Rpp / (2.0 * r) - (Rp * Rp) / (4.0 * r * R);
+    }
+
+    std::vector<Real> K5Shape::dfdParams(
+            Real z, const std::vector<Real>& p) const {
+        QL_REQUIRE(p.size() == 4,
+                   "K5Shape: expected 4 params (s, c, c_minus, c_plus), got "
+                   << p.size());
+        Real s = p[0];
+        Real c  = std::max(p[1], 0.0);
+        Real cm = std::max(p[2], 0.0);
+        Real cp = std::max(p[3], 0.0);
+        Real a = 1.0 + s * z;
+        Real c_eff, dc_dz, d2c_dz2;
+        k5CEff(z, c, cm, cp, c_eff, dc_dz, d2c_dz2);
+        Real R = 0.25 * a * a + 0.5 * c_eff * z * z;
+        Real sqrtR = (R > 0.0) ? std::sqrt(R) : 1.0;
+        K5Blend b = k5BlendAt(z);
+
+        // f = (1/2) a + sqrt(R).
+        // d/ds : 0.5 a contributes 0.5 z; R contributes 0.5 a z / (2 sqrtR).
+        Real ds = 0.5 * z + 0.25 * a * z / sqrtR;
+        // c_eff = (1-T) c + T c_wing, so:
+        //   d c_eff / d c       = 1 - T
+        //   d c_eff / d c_minus = T  (only when z<0; else 0)
+        //   d c_eff / d c_plus  = T  (only when z>=0; else 0)
+        // d R / d q = (1/2) z^2 (d c_eff / d q)
+        // d f / d q = d R / d q  /  (2 sqrtR)
+        Real dc      = z * z * (1.0 - b.T) / (4.0 * sqrtR);
+        Real dcm_pos = z * z * b.T         / (4.0 * sqrtR);
+        Real dcm = (z <  0.0) ? dcm_pos : 0.0;
+        Real dcp = (z >= 0.0) ? dcm_pos : 0.0;
+        return {ds, dc, dcm, dcp};
+    }
+
+
     // ===== K7Shape ============================================================
 
     namespace {
