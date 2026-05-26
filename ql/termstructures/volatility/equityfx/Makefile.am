@@ -21,6 +21,7 @@ this_include_HEADERS = \
     localvolcurve.hpp \
     localvolsurface.hpp \
     localvoltermstructure.hpp \
+    mixedspotvoltermstructure.hpp \
     mynewvolsurface.hpp \
     noexceptlocalvolsurface.hpp \
     parametriclocalvolsurface.hpp \
@@ -40,6 +41,7 @@ cpp_files = \
     hestonblackvolsurface.cpp \
     localvolsurface.cpp \
     localvoltermstructure.cpp \
+    mixedspotvoltermstructure.cpp \
     parametriclocalvolsurface.cpp \
     parametricvoltermstructure.cpp
 
