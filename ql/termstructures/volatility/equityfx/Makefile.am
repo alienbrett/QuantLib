@@ -13,6 +13,7 @@ this_include_HEADERS = \
     blackvoltermstructure.hpp \
     essvihelpers.hpp \
     essvivoltermstructure.hpp \
+    eventvollocalvoltermstructure.hpp \
     fixedlocalvolsurface.hpp \
     gridmodellocalvolsurface.hpp \
     hestonblackvolsurface.hpp \
@@ -37,6 +38,7 @@ cpp_files = \
     blackvoltermstructure.cpp \
     essvihelpers.cpp \
     essvivoltermstructure.cpp \
+    eventvollocalvoltermstructure.cpp \
     fixedlocalvolsurface.cpp \
     gridmodellocalvolsurface.cpp \
     hestonblackvolsurface.cpp \
