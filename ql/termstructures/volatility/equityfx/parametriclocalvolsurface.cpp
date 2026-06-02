@@ -89,4 +89,29 @@ namespace QuantLib {
         return blackSurface_->localVol(k, t);
     }
 
+    std::vector<Volatility> ParametricLocalVolSurface::localVolGrid(
+            const std::vector<Time>& times,
+            const std::vector<Real>& underlyingLevels) const {
+        const Size nT = times.size();
+        const Size nS = underlyingLevels.size();
+        std::vector<Volatility> out(nT * nS);
+        const Real spotVal = spot_->value();
+        std::vector<Real> logS(nS);
+        for (Size j = 0; j < nS; ++j)
+            logS[j] = std::log(underlyingLevels[j]);
+        for (Size i = 0; i < nT; ++i) {
+            Time t = times[i];
+            if (t < 1e-14) t = 1e-14;
+            DiscountFactor dr = riskFreeRate_->discount(t, true);
+            DiscountFactor dq = dividendYield_->discount(t, true);
+            Real logFwd = std::log(spotVal) + std::log(dq / dr);
+            Volatility* row = out.data() + i * nS;
+            for (Size j = 0; j < nS; ++j) {
+                Real k = logS[j] - logFwd;
+                row[j] = blackSurface_->localVol(k, t);
+            }
+        }
+        return out;
+    }
+
 } // namespace QuantLib

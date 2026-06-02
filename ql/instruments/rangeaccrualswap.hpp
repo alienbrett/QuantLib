@@ -69,7 +69,8 @@ namespace QuantLib {
             std::vector<Rate> upperTriggers,
             DayCounter raDayCount,
             BusinessDayConvention paymentConvention = Following,
-            BusinessDayConvention observationConvention = ModifiedFollowing);
+            BusinessDayConvention observationConvention = ModifiedFollowing,
+            bool finalCapitalExchange = false);
 
         //! \name Inspectors
         //@{
@@ -123,6 +124,7 @@ namespace QuantLib {
         DayCounter raDayCount_;
         BusinessDayConvention paymentConvention_;
         BusinessDayConvention observationConvention_;
+        bool finalCapitalExchange_;
 
         // cached per-period observation dates
         std::vector<std::vector<Date>> observationDates_;
@@ -156,6 +158,9 @@ namespace QuantLib {
 
         ext::shared_ptr<SwapIndex> observationIndex;
         Period observationTenor;
+
+        std::vector<bool> fixedIsRedemptionFlow;
+        std::vector<bool> raIsRedemptionFlow;
 
         void validate() const override;
     };

@@ -616,4 +616,112 @@ namespace QuantLib {
         return std::sqrt(std::max(w, 0.0) / t);
     }
 
+    // =================================================================
+    // Variance helpers and Dupire local vol
+    //
+    // Dupire in (K, T) space for undiscounted call C:
+    //   sigma_loc^2 = [dC/dT + (r-q)*K*dC/dK] / [0.5 * K^2 * p(K)]
+    // with dC/dK = -S(K/F), p(K) = q_x(x)/F, x = K/F.
+    // =================================================================
+
+    Real PwlPdfVolSurface::totalVariance(Real k, Time t) const {
+        if (t < 1e-14) t = 1e-14;
+        Real F = forward(t);
+        Real K = F * std::exp(k);
+        Volatility v = blackVolImpl(t, K);
+        return v * v * t;
+    }
+
+    Real PwlPdfVolSurface::totalVarianceTimeDerivative(Real k, Time t) const {
+        const Real dt = std::max(t * 1e-3, 1e-5);
+        Time tLo = std::max(t - dt, 1e-6);
+        Time tHi = t + dt;
+        Real wLo = totalVariance(k, tLo);
+        Real wHi = totalVariance(k, tHi);
+        return (wHi - wLo) / (tHi - tLo);
+    }
+
+    Real PwlPdfVolSurface::localVol(Real k, Time t) const {
+        return std::sqrt(localVariance(k, t));
+    }
+
+    Real PwlPdfVolSurface::localVariance(Real k, Time t) const {
+        if (t < 1e-14) t = 1e-14;
+
+        const Real volFloor = 0.005;
+        const Real volCap = 5.0;
+        const Real pdfFloor = 1e-8;
+
+        Real F = forward(t);
+        Real K = F * std::exp(k);
+        Real x = K / F;
+
+        // Black vol used both as floor and as wing fallback.
+        Real bvol = std::max(blackVolImpl(t, K), volFloor);
+        Real floorVar = bvol * bvol;
+
+        // Denominator: 0.5 * K^2 * p(K) = 0.5 * K^2 * q_x / F.
+        Real q_val = pdfValue(x, t);
+        if (q_val < pdfFloor)
+            return floorVar;
+        Real denominator = 0.5 * K * K * q_val / F;
+
+        // dC/dT at fixed K via two-slice FD on undiscounted call forwards.
+        Size N = slices_.size();
+        if (N == 1)
+            return floorVar;
+
+        Size lo, hi;
+        if (t <= slices_.front().T) {
+            lo = 0; hi = 1;
+        } else if (t >= slices_.back().T) {
+            lo = N - 2; hi = N - 1;
+        } else {
+            hi = 0;
+            for (Size i = 1; i < N; ++i)
+                if (slices_[i].T >= t) { hi = i; break; }
+            lo = hi - 1;
+        }
+
+        Real T_lo = slices_[lo].T;
+        Real T_hi = slices_[hi].T;
+        Real S = spot_->value();
+        Real F_lo = slices_[lo].calForward > 0.0
+            ? slices_[lo].calForward
+            : S * dividendYield_->discount(T_lo, true)
+                / riskFreeRate_->discount(T_lo, true);
+        Real F_hi = slices_[hi].calForward > 0.0
+            ? slices_[hi].calForward
+            : S * dividendYield_->discount(T_hi, true)
+                / riskFreeRate_->discount(T_hi, true);
+
+        Real x_lo = K / F_lo;
+        Real x_hi = K / F_hi;
+        Real C_lo = F_lo * callForward(x_lo, T_lo);
+        Real C_hi = F_hi * callForward(x_hi, T_hi);
+        Real dCdT = (C_hi - C_lo) / (T_hi - T_lo);
+        if (dCdT < 0.0) dCdT = 0.0;
+
+        // (r-q) at t — instantaneous forward rates from yield curves.
+        Real r_inst = riskFreeRate_->forwardRate(
+            t, t + 1e-4, Continuous, NoFrequency).rate();
+        Real q_inst = dividendYield_->forwardRate(
+            t, t + 1e-4, Continuous, NoFrequency).rate();
+        Real drift = r_inst - q_inst;
+
+        Real survK = survivalFunction(x, t);
+        Real dCdK = -survK;
+
+        Real numerator = dCdT + drift * K * dCdK;
+        if (numerator < 0.0) numerator = 0.0;
+
+        Real lv = numerator / denominator;
+        if (lv <= 0.0 || !std::isfinite(lv))
+            return floorVar;
+
+        // Relative cap: local vol ≤ 2× black vol → local var ≤ 4 × black var.
+        Real capVar = std::min(4.0 * bvol * bvol, volCap * volCap);
+        return std::min(std::max(lv, volFloor * volFloor), capVar);
+    }
+
 } // namespace QuantLib

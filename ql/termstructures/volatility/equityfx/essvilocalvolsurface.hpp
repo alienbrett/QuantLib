@@ -67,6 +67,22 @@ namespace QuantLib {
         void accept(AcyclicVisitor&) override;
         //@}
 
+        /*! Batched evaluation on a tensor-product (t, S) grid.
+
+            For each ``(times[i], underlyingLevels[j])`` returns the
+            analytic Dupire local volatility.  Output is row-major:
+            ``out[i * underlyingLevels.size() + j]``.
+
+            Mirrors the scalar ``localVol(t, S)`` path but amortises
+            the forward and ``log(S)`` work over the grid so it costs
+            ~1 call per (t, S) of pure C++ instead of a Python round-trip
+            per point.  Use case: pricers that need σ_loc on a regular
+            grid (FD engines, bulk batched pricers).
+        */
+        std::vector<Volatility> localVolGrid(
+            const std::vector<Time>& times,
+            const std::vector<Real>& underlyingLevels) const;
+
       protected:
         Volatility localVolImpl(Time t, Real underlyingLevel) const override;
 

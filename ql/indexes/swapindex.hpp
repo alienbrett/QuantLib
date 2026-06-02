@@ -125,6 +125,16 @@ namespace QuantLib {
         ext::shared_ptr<OvernightIndexedSwap> underlyingSwap(
                                                 const Date& fixingDate) const;
         //@}
+        //! \name SwapIndex clone overrides
+        //@{
+        ext::shared_ptr<SwapIndex> clone(
+                        const Handle<YieldTermStructure>& forwarding) const override;
+        ext::shared_ptr<SwapIndex> clone(
+                        const Handle<YieldTermStructure>& forwarding,
+                        const Handle<YieldTermStructure>& discounting) const override;
+        ext::shared_ptr<SwapIndex> clone(
+                        const Period& tenor) const override;
+        //@}
       protected:
         ext::shared_ptr<OvernightIndex> overnightIndex_;
         bool telescopicValueDates_;

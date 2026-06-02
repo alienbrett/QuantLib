@@ -42,7 +42,8 @@ namespace QuantLib {
         std::vector<Rate> upperTriggers,
         DayCounter raDayCount,
         BusinessDayConvention paymentConvention,
-        BusinessDayConvention observationConvention)
+        BusinessDayConvention observationConvention,
+        bool finalCapitalExchange)
     : Swap(2), type_(type),
       fixedNominal_(std::move(fixedNominal)),
       fixedSchedule_(std::move(fixedSchedule)),
@@ -58,7 +59,8 @@ namespace QuantLib {
       upperTriggers_(std::move(upperTriggers)),
       raDayCount_(std::move(raDayCount)),
       paymentConvention_(paymentConvention),
-      observationConvention_(observationConvention) {
+      observationConvention_(observationConvention),
+      finalCapitalExchange_(finalCapitalExchange) {
 
         init();
     }
@@ -132,6 +134,19 @@ namespace QuantLib {
                        "No observation dates for RA coupon period " << i);
         }
 
+        if (finalCapitalExchange_) {
+            // Append redemption to RA leg only (bond-style: receive
+            // par at maturity).  Fixed leg is left unchanged.
+            legs_[1].push_back(ext::shared_ptr<CashFlow>(
+                new Redemption(raNominal_.back(), legs_[1].back()->date())));
+            raNominal_.push_back(raNominal_.back());
+            raGearings_.push_back(0.0);
+            raSpreads_.push_back(0.0);
+            lowerTriggers_.push_back(0.0);
+            upperTriggers_.push_back(0.0);
+            observationDates_.push_back(std::vector<Date>());
+        }
+
         switch (type_) {
         case Swap::Payer:
             payer_[0] = +1.0;   // pays fixed
@@ -164,14 +179,26 @@ namespace QuantLib {
         arguments->fixedResetDates.resize(nFixed);
         arguments->fixedPayDates.resize(nFixed);
         arguments->fixedCoupons.resize(nFixed);
+        arguments->fixedIsRedemptionFlow.resize(nFixed, false);
 
         for (Size i = 0; i < nFixed; ++i) {
             auto coupon =
                 ext::dynamic_pointer_cast<FixedRateCoupon>(fixedCoupons[i]);
-            QL_REQUIRE(coupon, "expected FixedRateCoupon on fixed leg");
-            arguments->fixedResetDates[i] = coupon->accrualStartDate();
-            arguments->fixedPayDates[i] = coupon->date();
-            arguments->fixedCoupons[i] = coupon->amount();
+            if (coupon != nullptr) {
+                arguments->fixedResetDates[i] = coupon->accrualStartDate();
+                arguments->fixedPayDates[i] = coupon->date();
+                arguments->fixedCoupons[i] = coupon->amount();
+            } else {
+                // Redemption flow (finalCapitalExchange)
+                auto cashflow =
+                    ext::dynamic_pointer_cast<CashFlow>(fixedCoupons[i]);
+                arguments->fixedIsRedemptionFlow[i] = true;
+                arguments->fixedCoupons[i] = cashflow->amount();
+                arguments->fixedPayDates[i] = cashflow->date();
+                // Use previous coupon's reset date
+                arguments->fixedResetDates[i] =
+                    i > 0 ? arguments->fixedResetDates[i - 1] : cashflow->date();
+            }
         }
 
         // RA leg
@@ -185,14 +212,25 @@ namespace QuantLib {
         arguments->raResetDates.resize(nRA);
         arguments->raPayDates.resize(nRA);
         arguments->raAccrualTimes.resize(nRA);
+        arguments->raIsRedemptionFlow.resize(nRA, false);
 
         for (Size i = 0; i < nRA; ++i) {
             auto coupon =
                 ext::dynamic_pointer_cast<FixedRateCoupon>(raCoupons[i]);
-            QL_REQUIRE(coupon, "expected coupon on RA leg");
-            arguments->raResetDates[i] = coupon->accrualStartDate();
-            arguments->raPayDates[i] = coupon->date();
-            arguments->raAccrualTimes[i] = coupon->accrualPeriod();
+            if (coupon != nullptr) {
+                arguments->raResetDates[i] = coupon->accrualStartDate();
+                arguments->raPayDates[i] = coupon->date();
+                arguments->raAccrualTimes[i] = coupon->accrualPeriod();
+            } else {
+                // Redemption flow (finalCapitalExchange)
+                auto cashflow =
+                    ext::dynamic_pointer_cast<CashFlow>(raCoupons[i]);
+                arguments->raIsRedemptionFlow[i] = true;
+                arguments->raPayDates[i] = cashflow->date();
+                arguments->raAccrualTimes[i] = 0.0;
+                arguments->raResetDates[i] =
+                    i > 0 ? arguments->raResetDates[i - 1] : cashflow->date();
+            }
         }
 
         arguments->observationDates = observationDates_;

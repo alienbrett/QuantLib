@@ -120,6 +120,27 @@ namespace QuantLib {
         Real survivalFunction(Real x, Time t) const;
 
         const std::vector<PdfSlice>& pdfSlices() const { return slices_; }
+
+        /*! Forward F(t) used internally; exposed so wrappers (e.g.
+            PwlPdfLocalVolSurface) can map between strike and log-moneyness. */
+        Real forward(Time t) const;
+
+        /*! Total Black variance w(k, t) = blackVol(t, F·exp(k))² · t. */
+        Real totalVariance(Real k, Time t) const;
+
+        /*! Calendar derivative dw/dt at fixed log-moneyness k.  Central
+            FD with adaptive step; primary use is Gatheral-Dupire local
+            variance via this surface's PDF representation. */
+        Real totalVarianceTimeDerivative(Real k, Time t) const;
+
+        /*! Gatheral-Dupire local variance at log-moneyness k and time t.
+            Derived from the PWL PDF (analytical p(K), survival function,
+            and call-forward) in (K, T) space and converted to log-money
+            local variance for callers. */
+        Real localVariance(Real k, Time t) const;
+
+        /*! Gatheral-Dupire local volatility = sqrt(localVariance(k, t)). */
+        Real localVol(Real k, Time t) const;
         //@}
 
         //! \name Visitability
@@ -138,7 +159,6 @@ namespace QuantLib {
         Real blackVarianceImpl(Time t, Real strike) const override;
 
       private:
-        Real forward(Time t) const;
         Real forwardAtSlice(Size idx) const;
         Real callForwardSlice(Size idx, Real xEval) const;
         Real interpolatePdf(Size idx, Real xEval) const;

@@ -10,7 +10,6 @@
 #include <ql/termstructures/volatility/equityfx/blackvoltermstructure.hpp>
 #include <ql/termstructures/volatility/equityfx/essvihelpers.hpp>
 #include <ql/termstructures/volatility/equityfx/essvivoltermstructure.hpp>
-#include <ql/termstructures/volatility/equityfx/eventvollocalvoltermstructure.hpp>
 #include <ql/termstructures/volatility/equityfx/fixedlocalvolsurface.hpp>
 #include <ql/termstructures/volatility/equityfx/gridmodellocalvolsurface.hpp>
 #include <ql/termstructures/volatility/equityfx/hestonblackvolsurface.hpp>

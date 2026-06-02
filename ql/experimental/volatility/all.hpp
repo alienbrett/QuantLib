@@ -23,4 +23,5 @@
 #include <ql/experimental/volatility/zabrinterpolatedsmilesection.hpp>
 #include <ql/experimental/volatility/zabrinterpolation.hpp>
 #include <ql/experimental/volatility/zabrsmilesection.hpp>
+#include <ql/experimental/volatility/zabrswaptionvol.hpp>
 

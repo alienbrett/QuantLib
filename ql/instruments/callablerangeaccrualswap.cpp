@@ -27,11 +27,13 @@ namespace QuantLib {
         ext::shared_ptr<RangeAccrualSwap> swap,
         const ext::shared_ptr<Exercise>& exercise,
         Settlement::Type delivery,
-        Settlement::Method settlementMethod)
+        Settlement::Method settlementMethod,
+        Real callPrice)
     : Option(ext::shared_ptr<Payoff>(), exercise),
       swap_(std::move(swap)),
       settlementType_(delivery),
-      settlementMethod_(settlementMethod) {
+      settlementMethod_(settlementMethod),
+      callPrice_(callPrice) {
 
         registerWith(swap_);
         swap_->alwaysForwardNotifications();
@@ -54,6 +56,7 @@ namespace QuantLib {
         arguments->exercise = exercise_;
         arguments->settlementType = settlementType_;
         arguments->settlementMethod = settlementMethod_;
+        arguments->callPrice = callPrice_;
     }
 
     void CallableRangeAccrualSwap::arguments::validate() const {

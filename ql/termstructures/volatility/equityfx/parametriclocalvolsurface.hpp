@@ -78,6 +78,16 @@ namespace QuantLib {
             return blackSurface_;
         }
 
+        /*! Batched evaluation on a tensor-product (t, S) grid.
+
+            Returns ``out[i * underlyingLevels.size() + j]`` = analytic
+            ``localVol(times[i], underlyingLevels[j])``.  See
+            EssviLocalVolSurface::localVolGrid for the use case rationale.
+        */
+        std::vector<Volatility> localVolGrid(
+            const std::vector<Time>& times,
+            const std::vector<Real>& underlyingLevels) const;
+
       protected:
         Volatility localVolImpl(Time t, Real underlyingLevel) const override;
 

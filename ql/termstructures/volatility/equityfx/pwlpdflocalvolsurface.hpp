@@ -18,17 +18,16 @@
 */
 
 /*! \file pwlpdflocalvolsurface.hpp
-    \brief Analytical Dupire local vol from piecewise-linear PDF surface
+    \brief Gatheral-Dupire local vol from PwlPdfVolSurface total variance
 
-    Uses Dupire's formula with the PDF available analytically:
-      sigma_loc^2 = (dC/dT) / (0.5 * K^2 * p(K,T))
-    where p(K,T) is the strike-space density = q(k) / (F * K),
-    and dC/dT is a finite difference of analytically-computed call prices
-    between adjacent expiry slices.
+    Computes local vol via the Gatheral formula applied to the
+    PwlPdfVolSurface's totalVariance(k, t) function:
 
-    Eliminates the double finite-difference noise of NoExceptLocalVolSurface
-    (which bumps the black vol surface to estimate d^2C/dK^2 and dC/dT).
-    Here the denominator (butterfly density) is exact from the QP.
+      σ²_loc = (∂w/∂t) / g(k, w, ∂w/∂k, ∂²w/∂k²)
+
+    where w(k, t) is linearly interpolated in t between expiry slices
+    at fixed log-moneyness k (not fixed strike), with calendar
+    monotonicity enforced.  Same formula as EssviLocalVolSurface.
 */
 
 #ifndef quantlib_pwl_pdf_local_vol_surface_hpp
@@ -68,6 +67,16 @@ namespace QuantLib {
         //@{
         void accept(AcyclicVisitor&) override;
         //@}
+
+        /*! Batched evaluation on a tensor-product (t, S) grid.
+
+            Returns ``out[i * underlyingLevels.size() + j]`` = analytic
+            ``localVol(times[i], underlyingLevels[j])``.  See
+            EssviLocalVolSurface::localVolGrid for the use case rationale.
+        */
+        std::vector<Volatility> localVolGrid(
+            const std::vector<Time>& times,
+            const std::vector<Real>& underlyingLevels) const;
 
       protected:
         Volatility localVolImpl(Time t, Real underlyingLevel) const override;

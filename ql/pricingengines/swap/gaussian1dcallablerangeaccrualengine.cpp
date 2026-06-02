@@ -229,7 +229,13 @@ namespace QuantLib {
 
         Real fixedNpv = 0.0;
         for (Size i = fixedIdx; i < arguments_.fixedResetDates.size(); ++i) {
-            fixedNpv += arguments_.fixedCoupons[i] *
+            Real amount;
+            if (!arguments_.fixedIsRedemptionFlow.empty() &&
+                arguments_.fixedIsRedemptionFlow[i])
+                amount = arguments_.fixedCoupons[i];
+            else
+                amount = arguments_.fixedCoupons[i];
+            fixedNpv += amount *
                         model_->zerobond(arguments_.fixedPayDates[i],
                                          expiry, y, discountCurve_);
         }
@@ -242,15 +248,22 @@ namespace QuantLib {
 
         Real raNpv = 0.0;
         for (Size i = raIdx; i < arguments_.raResetDates.size(); ++i) {
-            Real accrualFrac =
-                expectedAccrualFraction(allRoots[i], expiryTime, y);
+            Real amount;
+            if (!arguments_.raIsRedemptionFlow.empty() &&
+                arguments_.raIsRedemptionFlow[i]) {
+                // Redemption: use pre-computed nominal amount directly
+                amount = arguments_.raNominal[i];
+            } else {
+                Real accrualFrac =
+                    expectedAccrualFraction(allRoots[i], expiryTime, y);
 
-            // Standard RA coupon:
-            //   nominal * dcf * (gearing * accrualFrac + spread)
-            Real amount = arguments_.raNominal[i] *
-                          arguments_.raAccrualTimes[i] *
-                          (arguments_.raGearings[i] * accrualFrac +
-                           arguments_.raSpreads[i]);
+                // Standard RA coupon:
+                //   nominal * dcf * (gearing * accrualFrac + spread)
+                amount = arguments_.raNominal[i] *
+                              arguments_.raAccrualTimes[i] *
+                              (arguments_.raGearings[i] * accrualFrac +
+                               arguments_.raSpreads[i]);
+            }
 
             raNpv += amount *
                      model_->zerobond(arguments_.raPayDates[i],
@@ -277,7 +290,13 @@ namespace QuantLib {
         Size nRA = arguments_.raPayDates.size();
         std::vector<std::vector<ObsRoot>> allRoots(nRA);
         for (Size i = 0; i < nRA; ++i) {
-            allRoots[i] = precomputeRoots(i, settlement);
+            if (!arguments_.raIsRedemptionFlow.empty() &&
+                arguments_.raIsRedemptionFlow[i]) {
+                // Redemption flow has no observation dates — skip
+                allRoots[i] = {};
+            } else {
+                allRoots[i] = precomputeRoots(i, settlement);
+            }
         }
 
         // --- Backward induction ---
@@ -371,6 +390,13 @@ namespace QuantLib {
                     Real exerciseValue =
                         underlyingNpv(expiry0, z[k], allRoots) /
                         model_->numeraire(expiry0Time, z[k], discountCurve_);
+                    // Callable bond: issuer pays callPrice to terminate.
+                    // The call option payoff = underlyingNpv - callPrice.
+                    if (arguments_.callPrice > 0.0) {
+                        exerciseValue -=
+                            arguments_.callPrice /
+                            model_->numeraire(expiry0Time, z[k], discountCurve_);
+                    }
                     npv0[k] = std::max(npv0[k], exerciseValue);
                 }
             }
@@ -384,5 +410,9 @@ namespace QuantLib {
 
         results_.value =
             npv1[0] * model_->numeraire(0.0, 0.0, discountCurve_);
+
+        // Expose non-callable underlying swap NPV at (settlement, y=0)
+        results_.additionalResults["underlyingValue"] =
+            underlyingNpv(settlement, 0.0, allRoots);
     }
 }

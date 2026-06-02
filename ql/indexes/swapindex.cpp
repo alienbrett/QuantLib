@@ -216,4 +216,26 @@ namespace QuantLib {
         return lastSwap_;
     }
 
+    ext::shared_ptr<SwapIndex>
+    OvernightIndexedSwapIndex::clone(const Handle<YieldTermStructure>& forwarding) const {
+        return ext::make_shared<OvernightIndexedSwapIndex>(
+            familyName(), tenor(), fixingDays(), currency(),
+            ext::dynamic_pointer_cast<OvernightIndex>(overnightIndex_->clone(forwarding)),
+            telescopicValueDates_, averagingMethod_);
+    }
+
+    ext::shared_ptr<SwapIndex>
+    OvernightIndexedSwapIndex::clone(const Handle<YieldTermStructure>& forwarding,
+                                     const Handle<YieldTermStructure>& /* discounting */) const {
+        // OIS indexes don't use separate discounting — forward curve is the discount curve
+        return clone(forwarding);
+    }
+
+    ext::shared_ptr<SwapIndex>
+    OvernightIndexedSwapIndex::clone(const Period& tenor) const {
+        return ext::make_shared<OvernightIndexedSwapIndex>(
+            familyName(), tenor, fixingDays(), currency(),
+            overnightIndex_, telescopicValueDates_, averagingMethod_);
+    }
+
 }

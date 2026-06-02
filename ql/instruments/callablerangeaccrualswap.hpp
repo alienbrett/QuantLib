@@ -52,7 +52,8 @@ namespace QuantLib {
             ext::shared_ptr<RangeAccrualSwap> swap,
             const ext::shared_ptr<Exercise>& exercise,
             Settlement::Type delivery = Settlement::Physical,
-            Settlement::Method settlementMethod = Settlement::PhysicalOTC);
+            Settlement::Method settlementMethod = Settlement::PhysicalOTC,
+            Real callPrice = 0.0);
 
         //! \name Instrument interface
         //@{
@@ -73,10 +74,13 @@ namespace QuantLib {
         }
         //@}
 
+        Real callPrice() const { return callPrice_; }
+
       private:
         ext::shared_ptr<RangeAccrualSwap> swap_;
         Settlement::Type settlementType_;
         Settlement::Method settlementMethod_;
+        Real callPrice_;
     };
 
     //! %Arguments for callable range accrual swap calculation
@@ -88,6 +92,7 @@ namespace QuantLib {
         ext::shared_ptr<RangeAccrualSwap> swap;
         Settlement::Type settlementType = Settlement::Physical;
         Settlement::Method settlementMethod = Settlement::PhysicalOTC;
+        Real callPrice = 0.0;
         void validate() const override;
     };
 
