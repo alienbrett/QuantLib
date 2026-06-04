@@ -371,6 +371,14 @@ namespace QuantLib {
             this->update();
         }
 
+        // Vectorized zerobond: P(t,T,y) for a whole array of state values in
+        // one call. The scalar zerobond/zerobondImpl wraps Array(1,y) and
+        // throws this batching away; exposing it lets callers (e.g. tree
+        // engines evaluating an x-grid) amortize the per-(t,T) Gauss-Hermite
+        // setup across all states. Equivalent to the scalar zerobond with an
+        // empty yts handle (no term-structure reconciliation factor applied).
+        Array zerobondArray(Time T, Time t, const Array& y) const;
+
       protected:
         Real numeraireImpl(Time t, Real y, const Handle<YieldTermStructure>& yts) const override;
 
@@ -425,7 +433,6 @@ namespace QuantLib {
 
         Array deflatedZerobondArray(Time T, Time t, const Array& y) const;
         Array numeraireArray(Time t, const Array& y) const;
-        Array zerobondArray(Time T, Time t, const Array& y) const;
 
         Real deflatedZerobond(Time T, Time t = 0.0, Real y = 0.0) const;
 
