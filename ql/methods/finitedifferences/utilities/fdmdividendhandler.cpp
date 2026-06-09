@@ -38,10 +38,22 @@ namespace QuantLib {
       equityDirection_(equityDirection) {
 
         dividends_.reserve(schedule.size());
+        dividendCashflows_.reserve(schedule.size());
         dividendDates_.reserve(schedule.size());
         dividendTimes_.reserve(schedule.size());
         for (const auto& iter : schedule) {
-            dividends_.push_back(iter->amount());
+            // FixedDividend::amount() returns the constant payout, used as
+            // an informational accessor + cached for callers that want
+            // pre-computed cash amounts.  FractionalDividend::amount()
+            // throws unless a nominal was preset; in that case we keep 0
+            // here -- the per-grid-node drop is computed in applyTo via
+            // amount(underlying) so it scales with simulated spot.
+            const auto& fd = ext::dynamic_pointer_cast<FractionalDividend>(iter);
+            if (fd && fd->nominal() == Null<Real>())
+                dividends_.push_back(0.0);
+            else
+                dividends_.push_back(iter->amount());
+            dividendCashflows_.push_back(iter);
             dividendDates_.push_back(iter->date());
             dividendTimes_.push_back(dayCounter.yearFraction(referenceDate, iter->date()));
         }
@@ -71,18 +83,24 @@ namespace QuantLib {
         auto iter = std::find(dividendTimes_.begin(), dividendTimes_.end(), t);
 
         if (iter != dividendTimes_.end()) {
-            const Real dividend = dividends_[iter - dividendTimes_.begin()];
+            // Dispatch to Dividend::amount(underlying) so FractionalDividend
+            // scales with the simulated spot at the ex-date (rate * spot)
+            // instead of being frozen at a single nominal at construction.
+            // FixedDividend ignores the argument and returns its constant
+            // amount, preserving legacy behaviour for cash divs.
+            const auto& div = dividendCashflows_[iter - dividendTimes_.begin()];
 
             if (mesher_->layout()->dim().size() == 1) {
                 LinearInterpolation interp(x_.begin(), x_.end(), aCopy.begin());
                 for (Size k=0; k<x_.size(); ++k) {
-                    a[k] = interp(std::max(x_[0], x_[k]-dividend), true);
+                    const Real drop = div->amount(x_[k]);
+                    a[k] = interp(std::max(x_[0], x_[k]-drop), true);
                 }
             }
             else {
                 Array tmp(x_.size());
                 Size xSpacing = mesher_->layout()->spacing()[equityDirection_];
-                
+
                 for (Size i=0; i<mesher_->layout()->dim().size(); ++i) {
                     if (i!=equityDirection_) {
                         Size ySpacing = mesher_->layout()->spacing()[i];
@@ -95,8 +113,9 @@ namespace QuantLib {
                                                        tmp.begin());
                             for (Size k=0; k<x_.size(); ++k) {
                                 Size index = j*ySpacing + k*xSpacing;
+                                const Real drop = div->amount(x_[k]);
                                 a[index] = interp(
-                                        std::max(x_[0], x_[k]-dividend), true);
+                                        std::max(x_[0], x_[k]-drop), true);
                             }
                         }
                     }

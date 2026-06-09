@@ -46,14 +46,25 @@ namespace QuantLib {
 
         const std::vector<Time>& dividendTimes() const;
         const std::vector<Date>& dividendDates() const;
+        // Pre-computed cash-equivalent amounts. For FixedDividend this is
+        // the dollar amount; for FractionalDividend without a preset
+        // nominal it's 0.0 (the true per-node drop is computed at runtime
+        // in applyTo via Dividend::amount(underlying)).
         const std::vector<Real>& dividends() const;
-        
+
       private:
         Array x_; // grid-equity values in physical units
 
         std::vector<Time> dividendTimes_;
         std::vector<Date> dividendDates_;
         std::vector<Real> dividends_;
+        // Original Dividend pointers, kept so applyTo can dispatch to the
+        // spot-aware ``amount(underlying)`` overload for FractionalDividend.
+        // For FixedDividend the overload returns the same constant amount;
+        // for FractionalDividend it returns ``rate * underlying``, applied
+        // per-grid-node at the ex-date so the spot drop scales with the
+        // simulated spot, not the spot-today nominal.
+        std::vector<ext::shared_ptr<Dividend>> dividendCashflows_;
         const ext::shared_ptr<FdmMesher> mesher_;
         const Size equityDirection_;
     };
