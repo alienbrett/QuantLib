@@ -457,6 +457,334 @@ namespace QuantLib {
     }
 
 
+    // ===== SplShape: quintic belly + softplus wings ===========================
+
+    namespace {
+
+        //! log(1+e^{tau u}) / tau, overflow-safe.
+        inline Real splSoftplus(Real u, Real tau) {
+            Real x = tau * u;
+            Real lse = (x > 0.0) ? (x + std::log1p(std::exp(-x)))
+                                 : std::log1p(std::exp(x));
+            return lse / tau;
+        }
+
+        inline Real splSigmoid(Real x) {
+            if (x >= 0.0)
+                return 1.0 / (1.0 + std::exp(-x));
+            Real e = std::exp(x);
+            return e / (1.0 + e);
+        }
+
+        /*! Quintic Hermite basis on t in [0,1], ordered
+            (f_left, d_left, s_left, f_right, d_right, s_right), where d/s are
+            the first/second derivatives in t.  Coefficients ascending in t.  */
+        const Real SPL_HERMITE[6][6] = {
+            { 1.0, 0.0, 0.0, -10.0,  15.0, -6.0 },
+            { 0.0, 1.0, 0.0,  -6.0,   8.0, -3.0 },
+            { 0.0, 0.0, 0.5,  -1.5,   1.5, -0.5 },
+            { 0.0, 0.0, 0.0,  10.0, -15.0,  6.0 },
+            { 0.0, 0.0, 0.0,  -4.0,   7.0, -3.0 },
+            { 0.0, 0.0, 0.0,   0.5,  -1.0,  0.5 }
+        };
+
+        //! j-th Hermite basis function differentiated `order` times, at t.
+        Real splHermiteDeriv(Size j, Size order, Real t) {
+            Real acc = 0.0;
+            for (Size k = order; k < 6; ++k) {
+                Real c = SPL_HERMITE[j][k];
+                if (c == 0.0)
+                    continue;
+                Real fall = 1.0;                    // k!/(k-order)!
+                for (Size m = 0; m < order; ++m)
+                    fall *= Real(k - m);
+                acc += c * fall * std::pow(t, Real(k - order));
+            }
+            return acc;
+        }
+
+        //! Gaussian elimination with partial pivoting; solves A X = B in place.
+        void splSolveInPlace(std::vector<std::vector<Real>>& A,
+                             std::vector<std::vector<Real>>& B) {
+            Size n = A.size(), m = B.empty() ? 0 : B[0].size();
+            for (Size col = 0; col < n; ++col) {
+                Size piv = col;
+                for (Size r = col + 1; r < n; ++r)
+                    if (std::fabs(A[r][col]) > std::fabs(A[piv][col]))
+                        piv = r;
+                QL_REQUIRE(std::fabs(A[piv][col]) > 1e-14,
+                           "SplShape: singular continuity system (degenerate knots?)");
+                std::swap(A[col], A[piv]);
+                std::swap(B[col], B[piv]);
+                Real d = A[col][col];
+                for (Size c = col; c < n; ++c) A[col][c] /= d;
+                for (Size c = 0; c < m; ++c)   B[col][c] /= d;
+                for (Size r = 0; r < n; ++r) {
+                    if (r == col) continue;
+                    Real fct = A[r][col];
+                    if (fct == 0.0) continue;
+                    for (Size c = col; c < n; ++c) A[r][c] -= fct * A[col][c];
+                    for (Size c = 0; c < m; ++c)   B[r][c] -= fct * B[col][c];
+                }
+            }
+        }
+
+    }  // namespace
+
+    SplShape::SplShape(std::vector<Real> knots, Real switchLeft, Real switchRight)
+    : knots_(std::move(knots)) {
+        Size n = knots_.size();
+        QL_REQUIRE(n >= 3, "SplShape: need >= 3 knots, got " << n);
+        for (Size i = 1; i < n; ++i)
+            QL_REQUIRE(knots_[i] > knots_[i-1],
+                       "SplShape: knots must be strictly increasing");
+        Size nAtm = 0;
+        for (Size i = 0; i < n; ++i)
+            if (knots_[i] == 0.0) { atmIdx_ = i; ++nAtm; }
+        QL_REQUIRE(nAtm == 1,
+                   "SplShape: knots must contain exactly one 0.0 (ATM anchor), got "
+                   << nAtm);
+        nNode_ = n - 1;
+        zl_ = knots_.front();
+        zr_ = knots_.back();
+        xLeft_  = (switchLeft  == Null<Real>()) ? zl_ : switchLeft;
+        xRight_ = (switchRight == Null<Real>()) ? zr_ : switchRight;
+
+        // ---- Solve for the interior (d, s) as a linear map of the node values.
+        // Unknowns x = [d_1..d_{n-2}, s_1..s_{n-2}]; the ends are clamped to
+        // d = s = 0 (flat AND zero-curvature tails).  Equations: C3 and C4
+        // continuity at each interior knot.  All linear => x = M * vals.
+        Size nInt = n - 2;
+        std::vector<std::vector<Real>> A(2*nInt, std::vector<Real>(2*nInt, 0.0));
+        std::vector<std::vector<Real>> B(2*nInt, std::vector<Real>(n, 0.0));
+
+        for (Size row_pair = 0; row_pair < nInt; ++row_pair) {
+            Size i = row_pair + 1;                 // interior knot index
+            Real hL = knots_[i] - knots_[i-1];
+            Real hR = knots_[i+1] - knots_[i];
+            for (Size eq = 0; eq < 2; ++eq) {
+                Size order = 3 + eq;
+                Size row = 2*row_pair + eq;
+                Real sL_ = std::pow(hL, Real(order));
+                Real sR_ = std::pow(hR, Real(order));
+                // p_L^(order)(z_i) - p_R^(order)(z_i) = 0
+                // left interval [z_{i-1}, z_i] at t=1; right [z_i, z_{i+1}] at t=0.
+                // Basis slots carry h-powers: value*1, slope*h, curvature*h^2.
+                for (Size j = 0; j < 6; ++j) {
+                    Real bl = splHermiteDeriv(j, order, 1.0) / sL_;
+                    Real br = splHermiteDeriv(j, order, 0.0) / sR_;
+                    Size nodeL = (j < 3) ? (i-1) : i;
+                    Size nodeR = (j < 3) ? i     : (i+1);
+                    Size kind  = j % 3;            // 0=value, 1=slope, 2=curvature
+                    Real hpowL = (kind == 0) ? 1.0 : ((kind == 1) ? hL : hL*hL);
+                    Real hpowR = (kind == 0) ? 1.0 : ((kind == 1) ? hR : hR*hR);
+                    Real cL =  bl * hpowL;
+                    Real cR = -br * hpowR;
+                    // node values -> B (moved to RHS, sign flipped); (d,s) -> A
+                    if (kind == 0) {
+                        B[row][nodeL] -= cL;
+                        B[row][nodeR] -= cR;
+                    } else {
+                        if (nodeL != 0 && nodeL != n-1) {
+                            Size col = (kind == 1) ? (nodeL-1) : (nInt + nodeL-1);
+                            A[row][col] += cL;
+                        }
+                        if (nodeR != 0 && nodeR != n-1) {
+                            Size col = (kind == 1) ? (nodeR-1) : (nInt + nodeR-1);
+                            A[row][col] += cR;
+                        }
+                    }
+                }
+            }
+        }
+        splSolveInPlace(A, B);                     // B is now M: (d,s) = M * vals
+
+        // ---- Fold M into a per-interval (6 x n) map  vals -> power coeffs.
+        // On interval i with u = z - z_i:
+        //   a0 = f_i, a1 = d_i, a2 = s_i/2, and a3..a5 from matching value,
+        //   slope and curvature at the right end.  Every term is linear in
+        //   vals, so we accumulate the coefficient rows directly.
+        coefMap_.assign(n-1, std::vector<Real>(6*n, 0.0));
+        auto dRow = [&](Size node, Size col) -> Real {
+            if (node == 0 || node == n-1) return 0.0;
+            return B[node-1][col];
+        };
+        auto sRow = [&](Size node, Size col) -> Real {
+            if (node == 0 || node == n-1) return 0.0;
+            return B[nInt + node-1][col];
+        };
+        for (Size i = 0; i + 1 < n; ++i) {
+            Real h = knots_[i+1] - knots_[i];
+            for (Size col = 0; col < n; ++col) {
+                Real fi   = (col == i)   ? 1.0 : 0.0;
+                Real fip1 = (col == i+1) ? 1.0 : 0.0;
+                Real di   = dRow(i, col),   dip1 = dRow(i+1, col);
+                Real si   = sRow(i, col),   sip1 = sRow(i+1, col);
+                Real a0 = fi, a1 = di, a2 = 0.5 * si;
+                Real D0 = fip1 - (a0 + a1*h + a2*h*h);
+                Real D1 = dip1 - (a1 + 2.0*a2*h);
+                Real D2 = sip1 - 2.0*a2;
+                Real a3 = ( 10.0*D0 - 4.0*D1*h + 0.5*D2*h*h) / (h*h*h);
+                Real a4 = (-15.0*D0 + 7.0*D1*h - 1.0*D2*h*h) / (h*h*h*h);
+                Real a5 = (  6.0*D0 - 3.0*D1*h + 0.5*D2*h*h) / (h*h*h*h*h);
+                coefMap_[i][0*n + col] = a0;
+                coefMap_[i][1*n + col] = a1;
+                coefMap_[i][2*n + col] = a2;
+                coefMap_[i][3*n + col] = a3;
+                coefMap_[i][4*n + col] = a4;
+                coefMap_[i][5*n + col] = a5;
+            }
+        }
+    }
+
+    void SplShape::ensureBelly(const std::vector<Real>& p) const {
+        QL_REQUIRE(p.size() == nNode_ + 4,
+                   "SplShape: expected " << (nNode_ + 4) << " params ("
+                   << nNode_ << " nodes + sL, sR, tauL, tauR), got " << p.size());
+        if (cacheValid_ && p == cacheKey_)
+            return;
+
+        Size n = knots_.size();
+        Real sL = p[nNode_], sR = p[nNode_+1], tauL = p[nNode_+2], tauR = p[nNode_+3];
+
+        nodeVals_.assign(n, 0.0);
+        for (Size i = 0, q = 0; i < n; ++i) {
+            if (i == atmIdx_)
+                continue;                          // pinned below
+            nodeVals_[i] = p[q++];
+        }
+        // ATM pin: base(0) = 1 - F_L(0) - F_R(0) so that f(0) = 1 exactly.
+        nodeVals_[atmIdx_] = 1.0
+            - sL * splSoftplus(xLeft_ - 0.0, tauL)
+            - sR * splSoftplus(0.0 - xRight_, tauR);
+
+        coeffs_.assign(n-1, std::vector<Real>(6, 0.0));
+        for (Size i = 0; i + 1 < n; ++i)
+            for (Size k = 0; k < 6; ++k) {
+                Real acc = 0.0;
+                for (Size col = 0; col < n; ++col)
+                    acc += coefMap_[i][k*n + col] * nodeVals_[col];
+                coeffs_[i][k] = acc;
+            }
+        baseL_ = nodeVals_.front();
+        baseR_ = nodeVals_.back();
+        cacheKey_ = p;
+        cacheValid_ = true;
+    }
+
+    Real SplShape::bellyEval(Real z, Size nu) const {
+        if (z < zl_ || z > zr_)                    // constant tails
+            return (nu == 0) ? ((z < zl_) ? baseL_ : baseR_) : 0.0;
+        // locate the interval containing z
+        Size i = Size(std::upper_bound(knots_.begin(), knots_.end(), z)
+                      - knots_.begin());
+        i = (i == 0) ? 0 : i - 1;
+        if (i + 1 >= knots_.size())
+            i = knots_.size() - 2;
+        const std::vector<Real>& a = coeffs_[i];
+        Real u = z - knots_[i];
+        switch (nu) {
+          case 0:
+            return a[0] + u*(a[1] + u*(a[2] + u*(a[3] + u*(a[4] + u*a[5]))));
+          case 1:
+            return a[1] + u*(2*a[2] + u*(3*a[3] + u*(4*a[4] + u*5*a[5])));
+          case 2:
+            return 2*a[2] + u*(6*a[3] + u*(12*a[4] + u*20*a[5]));
+          default:
+            return 0.0;
+        }
+    }
+
+    Real SplShape::f(Real z, const std::vector<Real>& p) const {
+        ensureBelly(p);
+        Real sL = p[nNode_], sR = p[nNode_+1], tauL = p[nNode_+2], tauR = p[nNode_+3];
+        return bellyEval(z, 0)
+             + sL * splSoftplus(xLeft_ - z, tauL)
+             + sR * splSoftplus(z - xRight_, tauR);
+    }
+
+    Real SplShape::dfdz(Real z, const std::vector<Real>& p) const {
+        ensureBelly(p);
+        Real sL = p[nNode_], sR = p[nNode_+1], tauL = p[nNode_+2], tauR = p[nNode_+3];
+        return bellyEval(z, 1)
+             - sL * splSigmoid(tauL * (xLeft_ - z))
+             + sR * splSigmoid(tauR * (z - xRight_));
+    }
+
+    Real SplShape::d2fdz2(Real z, const std::vector<Real>& p, Real /*h*/) const {
+        // Analytic -- this is the whole point of the quintic belly.  The base
+        // class would central-difference dfdz, which re-introduces an artifact
+        // exactly where the belly is stitched.
+        ensureBelly(p);
+        Real sL = p[nNode_], sR = p[nNode_+1], tauL = p[nNode_+2], tauR = p[nNode_+3];
+        Real gL = splSigmoid(tauL * (xLeft_ - z));
+        Real gR = splSigmoid(tauR * (z - xRight_));
+        return bellyEval(z, 2)
+             + sL * tauL * gL * (1.0 - gL)
+             + sR * tauR * gR * (1.0 - gR);
+    }
+
+    std::vector<Real> SplShape::dfdParams(
+            Real z, const std::vector<Real>& p) const {
+        ensureBelly(p);
+        Size n = knots_.size();
+        Real sL = p[nNode_], sR = p[nNode_+1], tauL = p[nNode_+2], tauR = p[nNode_+3];
+        std::vector<Real> out(nNode_ + 4, 0.0);
+
+        // d base / d nodeVals_j -- the cardinal basis, read straight off the
+        // precomputed constant map (flat tails => zero sensitivity outside,
+        // except through the clamped end value itself).
+        std::vector<Real> dBase(n, 0.0);
+        if (z < zl_) {
+            dBase[0] = 1.0;
+        } else if (z > zr_) {
+            dBase[n-1] = 1.0;
+        } else {
+            Size i = Size(std::upper_bound(knots_.begin(), knots_.end(), z)
+                          - knots_.begin());
+            i = (i == 0) ? 0 : i - 1;
+            if (i + 1 >= n)
+                i = n - 2;
+            Real u = z - knots_[i];
+            Real up[6] = { 1.0, u, u*u, u*u*u, u*u*u*u, u*u*u*u*u };
+            for (Size col = 0; col < n; ++col) {
+                Real acc = 0.0;
+                for (Size k = 0; k < 6; ++k)
+                    acc += coefMap_[i][k*n + col] * up[k];
+                dBase[col] = acc;
+            }
+        }
+
+        // Free node params map 1:1 onto node slots, skipping the pinned ATM one.
+        for (Size i = 0, q = 0; i < n; ++i) {
+            if (i == atmIdx_)
+                continue;
+            out[q++] = dBase[i];
+        }
+
+        // Wing params act twice: directly, and through the ATM pin
+        //   nodeVals_[atm] = 1 - sL*softplus(xL, tauL) - sR*softplus(-xR, tauR).
+        Real spL0 = splSoftplus(xLeft_ - 0.0, tauL);
+        Real spR0 = splSoftplus(0.0 - xRight_, tauR);
+        Real spLz = splSoftplus(xLeft_ - z, tauL);
+        Real spRz = splSoftplus(z - xRight_, tauR);
+        Real dPin = dBase[atmIdx_];
+
+        // d softplus_tau(u) / d tau = (u*sigmoid(tau u) - softplus)/tau
+        auto dSoftplusDTau = [](Real u, Real tau, Real sp) {
+            return (u * splSigmoid(tau * u) - sp) / tau;
+        };
+
+        out[nNode_]     = spLz - dPin * spL0;                       // d/dsL
+        out[nNode_ + 1] = spRz - dPin * spR0;                       // d/dsR
+        out[nNode_ + 2] = sL * (dSoftplusDTau(xLeft_ - z, tauL, spLz)
+                                - dPin * dSoftplusDTau(xLeft_ - 0.0, tauL, spL0));
+        out[nNode_ + 3] = sR * (dSoftplusDTau(z - xRight_, tauR, spRz)
+                                - dPin * dSoftplusDTau(0.0 - xRight_, tauR, spR0));
+        return out;
+    }
+
+
     // ===== ParametricVolTermStructure =========================================
 
     namespace {

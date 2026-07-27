@@ -54,6 +54,7 @@
 #include <ql/handle.hpp>
 #include <ql/shared_ptr.hpp>
 #include <ql/time/daycounters/actual365fixed.hpp>
+#include <ql/utilities/null.hpp>
 #include <vector>
 
 namespace QuantLib {
@@ -251,6 +252,79 @@ namespace QuantLib {
                     Real h = 1e-4) const override;
         std::vector<Real> dfdParams(
             Real z, const std::vector<Real>& params) const override;
+    };
+
+    //! SPL: flexible quintic-spline belly + Lee-boxed softplus wings.
+    /*! Unlike S3/JW/K5/K7 this shape is not a fixed closed form: the belly is
+        a spline through user-configured knots, so the number of parameters
+        depends on the knot grid supplied at construction.
+
+            f(z)    = base(z) + F_L(z) + F_R(z)
+            base(z) : quintic through the node values at `knots`, C4 across
+                      interior knots, with END SLOPES *and* END CURVATURES = 0.
+                      Outside the knot range base is constant, so the join onto
+                      the flat tail is C2 and the wings own all asymptotic
+                      slope.  The z=0 node is pinned so f(0) = 1 exactly:
+                      base(0) = 1 - F_L(0) - F_R(0).
+            F_R(z)  = sR * softplus_tauR(z - xR)
+            F_L(z)  = sL * softplus_tauL(xL - z)
+            softplus_tau(u) = log(1 + e^{tau u}) / tau
+
+        The quintic (rather than a cubic) matters for Dupire local vol: a cubic
+        belly is only C2, so f''' jumps at every knot and the local-vol surface
+        ridges there -- and gamma/vanna differentiate again.  C4 continuity
+        removes that.
+
+        params = (node_0, ..., node_{m-1}, sL, sR, tauL, tauR) where
+        m = knots.size() - 1 (the z=0 node is pinned, not a free parameter).
+
+        The belly is LINEAR in the node values: the interior first/second
+        derivatives follow from C3+C4 continuity plus the end conditions, all
+        linear, so the map (node values -> per-interval polynomial coefficients)
+        is a constant matrix precomputed once per knot grid.  That is what makes
+        dfdParams analytic rather than a finite-difference stencil.
+    */
+    class SplShape : public ParametricVolShape {
+      public:
+        /*! \param knots        strictly increasing belly node z-grid; must
+                                contain exactly one 0.0 (the ATM anchor).
+            \param switchLeft   z at which the left wing engages; Null => knots.front()
+            \param switchRight  z at which the right wing engages; Null => knots.back()
+        */
+        explicit SplShape(std::vector<Real> knots,
+                          Real switchLeft = Null<Real>(),
+                          Real switchRight = Null<Real>());
+
+        Real f(Real z, const std::vector<Real>& params) const override;
+        Real dfdz(Real z, const std::vector<Real>& params) const override;
+        Real d2fdz2(Real z, const std::vector<Real>& params,
+                    Real h = 1e-4) const override;
+        std::vector<Real> dfdParams(
+            Real z, const std::vector<Real>& params) const override;
+
+        //! Number of shape parameters implied by the knot grid.
+        Size nParams() const { return nNode_ + 4; }
+        const std::vector<Real>& knots() const { return knots_; }
+
+      private:
+        //! Rebuild the belly for `p` unless the 1-entry cache already holds it.
+        void ensureBelly(const std::vector<Real>& p) const;
+        //! Belly value / derivative of order `nu` at z, flat outside the knots.
+        Real bellyEval(Real z, Size nu) const;
+
+        std::vector<Real> knots_;
+        Size atmIdx_, nNode_;
+        Real xLeft_, xRight_, zl_, zr_;
+        //! coefMap_[i] maps the n node values to the 6 power-basis coefficients
+        //! of interval i (row-major 6 x n).  Constant for a given knot grid.
+        std::vector<std::vector<Real>> coefMap_;
+
+        // 1-entry cache keyed on the params vector (rebuilt once per fit pass).
+        mutable std::vector<Real> cacheKey_;
+        mutable std::vector<std::vector<Real>> coeffs_;  // per interval, 6 each
+        mutable std::vector<Real> nodeVals_;
+        mutable Real baseL_ = 0.0, baseR_ = 0.0;
+        mutable bool cacheValid_ = false;
     };
 
     //! Per-pillar slice spec for ParametricVolTermStructure.
