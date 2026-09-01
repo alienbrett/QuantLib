@@ -258,14 +258,18 @@ namespace QuantLib {
     const Real SPL_MAX_ATM_LEAK = 1e-2;
     //! Finite-difference-probe floor for SplShape belly control points.
     const Real SPL_COEF_FLOOR = 1e-8;
+    //! SplShape belly B-spline degree. Quintic => C4 across interior knots.
+    const Size SPL_BSPLINE_DEGREE = 5;
+    //! Power coefficients per interval: a quintic needs 6 (u^0 .. u^5).
+    const Size SPL_N_POW = SPL_BSPLINE_DEGREE + 1;
 
-    //! SPL: cubic-B-spline belly + Lee-boxed softplus wings.
+    //! SPL: quintic-B-spline belly + Lee-boxed softplus wings.
     /*! Unlike S3/JW/K5/K7 this shape is not a fixed closed form: the belly is a
         spline over user-configured knots, so the parameter count depends on the
         knot grid supplied at construction.
 
             f(z)    = base(z) + F_L(z) + F_R(z)
-            base(z) = sum_j c_j B_j(z)      (clamped cubic B-spline)
+            base(z) = sum_j c_j B_j(z)      (clamped quintic B-spline)
             F_R(z)  = sR * softplus_tau(z - xR)
             F_L(z)  = sL * softplus_tau(xL - z)
 
@@ -280,9 +284,15 @@ namespace QuantLib {
           channels, so c_j > 0 comes free from the existing parametrization.
         - NO OSCILLATION.  The curve lies in the convex hull of its control
           points, so it cannot overshoot chasing node values.
-        - SMOOTHNESS.  Simple interior knots give C2, which is what Dupire needs:
-          d2w/dk2 continuous means local vol is defined and continuous.  Higher
-          continuity is unnecessary and costs oscillation.
+        - SMOOTHNESS.  Degree 5, so simple interior knots give C4.  A cubic
+          basis gives only C2, leaving an O(1) jump in the THIRD derivative at
+          every knot.  Dupire differentiates total variance twice in strike, so
+          those jumps were measured at 360-441x the between-knot curvature
+          background -- ridges in the local-vol surface, which gamma and vanna
+          then differentiate again.  C2 is enough for local vol to EXIST; it is
+          not enough for it to be smooth.  Raising the degree costs no
+          oscillation here because the curve still lies in the convex hull of
+          its control points.
 
         The first three and last three control points are tied so
         base' = base'' = 0 at the outer knots; beyond them the belly is constant,
@@ -350,7 +360,7 @@ namespace QuantLib {
 
         // 1-entry cache keyed on the params vector (rebuilt once per fit pass).
         mutable std::vector<Real> cacheKey_;
-        mutable std::vector<std::vector<Real> > poly_;  // per interval, 4 each
+        mutable std::vector<std::vector<Real> > poly_;  // per interval, SPL_N_POW each
         mutable std::vector<Real> coef_;
         mutable Real sLc_ = 0.0, sRc_ = 0.0, scale_ = 1.0, wings0_ = 0.0;
         mutable bool cacheValid_ = false;

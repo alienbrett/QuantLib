@@ -457,7 +457,7 @@ namespace QuantLib {
     }
 
 
-    // ===== SplShape: cubic B-spline belly + softplus wings ===================
+    // ===== SplShape: quintic B-spline belly + softplus wings =================
 
     namespace {
 
@@ -555,8 +555,17 @@ namespace QuantLib {
                    << " of each unit of wing slope into the money (switch points "
                    << xLeft_ << "/" << xRight_ << "); max " << SPL_MAX_ATM_LEAK);
 
-        // Clamped cubic knot vector: end breakpoints repeated p times extra.
-        Size p = 3;
+        // Clamped knot vector: end breakpoints repeated p times extra.
+        //
+        // Degree 5, not 3.  A cubic basis is only C2 across simple interior
+        // knots, so the THIRD derivative jumps at every knot.  Dupire local
+        // vol differentiates total variance twice in strike, and those jumps
+        // were measured at 360-441x the between-knot curvature background --
+        // ridges in the LV surface, which gamma and vanna then differentiate
+        // again.  Quintic is C4, so the third and fourth derivatives are
+        // continuous.  Raising the DEGREE rather than abandoning the B-spline
+        // keeps positivity by construction (see the class docs).
+        Size p = SPL_BSPLINE_DEGREE;
         std::vector<Real> T;
         for (Size i = 0; i < p; ++i) T.push_back(knots_.front());
         for (Size i = 0; i < n; ++i)  T.push_back(knots_[i]);
@@ -579,17 +588,17 @@ namespace QuantLib {
 
         // Collapse to per-interval POWER coefficients about interval midpoints.
         // Running Cox-de Boor per quote is correct but far too slow in the fit
-        // hot loop; this turns evaluation into a Horner on four numbers.
+        // hot loop; this turns evaluation into a Horner on SPL_N_POW numbers.
         Size nInt = n - 1;
         mids_.resize(nInt);
         cmap_.assign(nInt, std::vector<std::vector<Real> >(
-                               4, std::vector<Real>(nFree_, 0.0)));
-        const Real fact[4] = { 1.0, 1.0, 2.0, 6.0 };
+                               SPL_N_POW, std::vector<Real>(nFree_, 0.0)));
+        const Real fact[SPL_N_POW] = { 1.0, 1.0, 2.0, 6.0, 24.0, 120.0 };
         std::vector<std::vector<Real> > d;
         for (Size i = 0; i < nInt; ++i) {
             mids_[i] = 0.5 * (knots_[i] + knots_[i+1]);
-            splBsplineDerivs(T, p, mids_[i], nBasis, 3, d);
-            for (Size k = 0; k < 4; ++k)
+            splBsplineDerivs(T, p, mids_[i], nBasis, SPL_BSPLINE_DEGREE, d);
+            for (Size k = 0; k < SPL_N_POW; ++k)
                 for (Size j = 0; j < nFree_; ++j) {
                     Real acc = 0.0;
                     for (Size bb = 0; bb < nBasis; ++bb)
@@ -627,13 +636,20 @@ namespace QuantLib {
         for (Size j = 0; j < nFree_; ++j) {
             switch (order) {
               case 0:
-                out[j] = c[0][j] + u*(c[1][j] + u*(c[2][j] + u*c[3][j])); break;
+                out[j] = c[0][j] + u*(c[1][j] + u*(c[2][j] + u*(c[3][j]
+                       + u*(c[4][j] + u*c[5][j])))); break;
               case 1:
-                out[j] = c[1][j] + u*(2.0*c[2][j] + u*3.0*c[3][j]); break;
+                out[j] = c[1][j] + u*(2.0*c[2][j] + u*(3.0*c[3][j]
+                       + u*(4.0*c[4][j] + u*5.0*c[5][j]))); break;
               case 2:
-                out[j] = 2.0*c[2][j] + u*6.0*c[3][j]; break;
+                out[j] = 2.0*c[2][j] + u*(6.0*c[3][j] + u*(12.0*c[4][j]
+                       + u*20.0*c[5][j])); break;
+              case 3:
+                out[j] = 6.0*c[3][j] + u*(24.0*c[4][j] + u*60.0*c[5][j]); break;
+              case 4:
+                out[j] = 24.0*c[4][j] + u*120.0*c[5][j]; break;
               default:
-                out[j] = 6.0*c[3][j]; break;
+                out[j] = 120.0*c[5][j]; break;
             }
         }
         return out;
@@ -668,9 +684,9 @@ namespace QuantLib {
         Real scale = (1.0 - wings0) / s0;
 
         Size nInt = mids_.size();
-        poly_.assign(nInt, std::vector<Real>(4, 0.0));
+        poly_.assign(nInt, std::vector<Real>(SPL_N_POW, 0.0));
         for (Size i = 0; i < nInt; ++i)
-            for (Size k = 0; k < 4; ++k) {
+            for (Size k = 0; k < SPL_N_POW; ++k) {
                 Real acc = 0.0;
                 for (Size j = 0; j < nFree_; ++j)
                     acc += cmap_[i][k][j] * q[j];
@@ -694,10 +710,12 @@ namespace QuantLib {
         Real u = z - mids_[i];
         const std::vector<Real>& a = poly_[i];
         switch (order) {
-          case 0: return a[0] + u*(a[1] + u*(a[2] + u*a[3]));
-          case 1: return a[1] + u*(2.0*a[2] + u*3.0*a[3]);
-          case 2: return 2.0*a[2] + u*6.0*a[3];
-          default: return 6.0*a[3];
+          case 0: return a[0] + u*(a[1] + u*(a[2] + u*(a[3] + u*(a[4] + u*a[5]))));
+          case 1: return a[1] + u*(2.0*a[2] + u*(3.0*a[3] + u*(4.0*a[4] + u*5.0*a[5])));
+          case 2: return 2.0*a[2] + u*(6.0*a[3] + u*(12.0*a[4] + u*20.0*a[5]));
+          case 3: return 6.0*a[3] + u*(24.0*a[4] + u*60.0*a[5]);
+          case 4: return 24.0*a[4] + u*120.0*a[5];
+          default: return 120.0*a[5];
         }
     }
 
